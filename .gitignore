@@ -1,0 +1,15 @@
+# Datasets stored alongside the code on the training server.
+/data/
+/PU1K/
+/PU1K_raw_meshes/
+/PUGAN/
+/PU-GAN/
+*.h5
+*.hdf5
+
+# Default PU-GCSNet training and evaluation outputs.
+/our/PU-GCSNet/model/
+
+# Python bytecode.
+__pycache__/
+*.py[cod]
