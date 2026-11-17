@@ -40,7 +40,13 @@ python -m pip install --no-build-isolation ./losses
 
 数据接口沿用 H5 键 `poisson_256` 和 `poisson_1024`，形状分别为 `[S,256,3]` 和 `[S,1024,3]`。训练仍从稠密 GT 非均匀抽取 256 个输入点，并同步旋转输入和 GT。验证使用 H5 固定输入和 GT，关闭随机增广。几何监督在增广后的 GT 上实时计算 PCA，因此方向与当前样本一致，推断只读取输入点云。
 
-本轮实现了独立 `--h5_data`、`--val_h5` 接口，也支持 `--val_data` 与 `--val_gt` 指定整物体验证。此前商定的 PU1K + PU-GAN 按网格随机留出 10% 的名单和训练文件尚需预处理生成。原始 PU1K `*_addpugan.h5` 已包含 PU-GAN 的 24,000 个 patch，合并时按已核对的重复关系去重。以下命令中的 `train.h5` 和 `val.h5` 表示预处理完成后的文件。
+`prepare_data.py` 从 `PU1K/PU1K_raw_meshes/train/train_meshes` 和 `PUGAN/PU-GAN/{simple,medium,complex}` 读取官方训练网格。它按来源各随机留出 10% 的网格，生成 `train.h5`、`val.h5` 和记录网格归属及 patch 行范围的 `split.json`。默认种子 42 对应 918 个训练网格和 102 个验证网格。
+
+```bash
+python prepare_data.py --data-root /data --output-dir /data/prepared --seed 42
+```
+
+脚本按三角形面积对原始网格重新采样，用 FPS 选 patch 中心并取 kNN，每个 ShapeNet 网格生成 50 对、每个 PU-GAN 网格生成 200 对 `256 → 1024` 点的 patch。生成结果保留加载器所需的 H5 键名。两组实验使用同一份预处理结果。整物体验证也可通过 `--val_data` 和 `--val_gt` 提供独立的 XYZ 点对。最终测试用原数据集的测试点对。
 
 ```bash
 python main.py --phase train --name E3_seed42 \
@@ -101,6 +107,6 @@ python main.py --phase eval --test_data /data/PU1K/PU1K/test/input_2048/input_20
 
 本轮已经通过 7 项测试、真实 PU1K 小样本的 100 次优化、恢复后开启两种几何损失的 4 次优化，以及单个完整物体 2048→8192 的命令行推断。测试覆盖全部 12 参数通道的有限非零梯度、确定性、点排列、退化邻域、各消融返回接口、几何损失与基线前向等价。基线等价检查将两者放在同一算子后端，独立基线目录需要在原相对位置。
 
-当前结果用于验证实现和训练通路。完整 90/10 数据预处理、正式训练、多种子消融、CUDA 扩展和 CGAL P2F 验证仍待后续实验。
+当前结果用于验证实现和训练通路。正式训练、多种子消融、CUDA 扩展和 CGAL P2F 验证仍待后续实验。
 
 代码沿用 PU-CRN 的 Apache 2.0 许可证与原有第三方来源声明。基线论文为 Du et al., Point Cloud Upsampling via Cascaded Refinement Network, ACCV 2022。
