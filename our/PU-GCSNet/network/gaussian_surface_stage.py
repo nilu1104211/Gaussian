@@ -83,5 +83,6 @@ class GaussianSurfaceStage(nn.Module):
             generated = (mu.unsqueeze(-2) + u[..., None] * tangent.unsqueeze(-2)
                          + v[..., None] * bitangent.unsqueeze(-2) + height[..., None] * normal.unsqueeze(-2))
             aux = dict(mu=mu, n_pred=normal, t1=tangent, t2=bitangent, sigma=sigma,
-                       abc=abc, local_scale=scale, height=height, frame_valid=frame['valid'])
+                       abc=abc, local_scale=scale, height=height, frame_valid=frame['valid'],
+                       pca_ratios=frame['ratios'])
         return generated.flatten(1, 2).transpose(1, 2).contiguous(), aux

@@ -96,9 +96,9 @@ def checkpoint_state(path, device):
 
 
 def make_network(args, device, checkpoint=None):
-    config = {key: getattr(args, key) for key in NETWORK_KEYS}
-    if checkpoint is not None:
-        config = checkpoint.get('network_config', config)
+    config = checkpoint.get('network_config') if checkpoint is not None else None
+    if config is None:
+        config = {key: getattr(args, key) for key in NETWORK_KEYS}
     net = PUGCSNet(args.up_ratio, **config).to(device)
     if checkpoint is not None:
         net.load_state_dict(checkpoint['net_state_dict'])
@@ -245,7 +245,7 @@ def train(args, device):
 
 
 @torch.no_grad()
-def predict_shape(net, points, args):
+def predict_shape(net, points, args, return_candidates=False):
     # Same overlapping 256-point patches and final FPS protocol as PU-CRN.
     count = points.shape[2]
     if count < args.num_point:
@@ -265,11 +265,14 @@ def predict_shape(net, points, args):
             outputs = dict(p3=net(patch))
         for name, output in outputs.items():
             predictions[name].append(output.transpose(1, 2) * scale + centroid)
-    merged = {}
+    merged, candidates = {}, {}
     for name, chunks in predictions.items():
         desired = count * (2 if name == 'p1' else 4)
-        _, merged[name] = operations.fps_subsample(torch.cat(chunks, dim=2), desired)
-    return merged
+        cloud = torch.cat(chunks, dim=2)
+        _, merged[name] = operations.fps_subsample(cloud, desired)
+        if return_candidates:
+            candidates[name] = cloud
+    return (merged, candidates) if return_candidates else merged
 
 
 @torch.no_grad()
@@ -304,13 +307,30 @@ def test(args, net, device, input_dir=None, output_dir=None):
     return output_dir
 
 
+def unit_cloud(path):
+    xyz = np.loadtxt(path, ndmin=2)[:, :3]
+    if xyz.shape[1] != 3 or not len(xyz) or not np.isfinite(xyz).all():
+        raise ValueError(f'Invalid XYZ coordinates: {path}')
+    normalized, _, _ = pc_utils.normalize_point_cloud(xyz[None])
+    return torch.as_tensor(normalized, dtype=torch.float32)
+
+
+def distance_metrics(forward, backward):
+    """Per-object metrics from squared nearest distances, prediction first."""
+    pred_hd = forward.amax(dim=-1)
+    gt_hd = backward.amax(dim=-1)
+    return dict(CD=forward.mean(-1) + backward.mean(-1),
+                HD_squared=torch.maximum(pred_hd, gt_hd),
+                HD_legacy_sum=pred_hd + gt_hd,
+                HD_pred_to_gt_sq=pred_hd, HD_gt_to_pred_sq=gt_hd)
+
+
 def evaluate(pred_dir, gt_dir):
     pred_dir, gt_dir = Path(pred_dir), Path(gt_dir)
     predictions = sorted(pred_dir.glob('*.xyz'))
     predictions = [p for p in predictions if not p.stem.endswith('_point2mesh_distance')]
     if not predictions:
         raise ValueError('No predictions to evaluate')
-    device = torch.device('cpu')
     metric = CD_dist()
     rows = []
     all_p2f = []
@@ -319,13 +339,8 @@ def evaluate(pred_dir, gt_dir):
         if not reference.is_file():
             raise ValueError('Missing ground truth: %s' % reference)
         # Preserve the baseline evaluation normalization for existing CD comparisons.
-        pred, _, _ = pc_utils.normalize_point_cloud(np.loadtxt(path)[:, :3][None])
-        gt, _, _ = pc_utils.normalize_point_cloud(np.loadtxt(reference)[:, :3][None])
-        forward, backward = metric(torch.tensor(pred, device=device, dtype=torch.float32),
-                                   torch.tensor(gt, device=device, dtype=torch.float32))
-        rows.append(dict(name=path.stem, CD=(forward.mean() + backward.mean()).item(),
-                         HD_squared=torch.maximum(forward.max(), backward.max()).item(),
-                         HD_legacy_sum=(forward.max() + backward.max()).item()))
+        values = distance_metrics(*metric(unit_cloud(path), unit_cloud(reference)))
+        rows.append(dict(name=path.stem, **{key: value.item() for key, value in values.items()}))
         distance_file = path.with_name(path.stem + '_point2mesh_distance.xyz')
         if distance_file.exists():
             distances = np.loadtxt(distance_file, ndmin=2)[:, 3]
@@ -333,7 +348,7 @@ def evaluate(pred_dir, gt_dir):
             if distances.size:
                 rows[-1].update(P2F_mean=float(distances.mean()), P2F_std=float(distances.std()))
                 all_p2f.append(distances)
-    scores = {key: float(np.mean([row[key] for row in rows])) for key in ('CD', 'HD_squared', 'HD_legacy_sum')}
+    scores = {key: float(np.mean([row[key] for row in rows])) for key in values}
     if all_p2f:
         distances = np.concatenate(all_p2f)
         scores.update(P2F_mean=float(distances.mean()), P2F_std=float(distances.std()),

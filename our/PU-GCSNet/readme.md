@@ -107,6 +107,34 @@ python main.py --phase eval --test_data /data/PU1K/PU1K/test/input_2048/input_20
 
 本轮已经通过 7 项测试、真实 PU1K 小样本的 100 次优化、恢复后开启两种几何损失的 4 次优化，以及单个完整物体 2048→8192 的命令行推断。测试覆盖全部 12 参数通道的有限非零梯度、确定性、点排列、退化邻域、各消融返回接口、几何损失与基线前向等价。基线等价检查将两者放在同一算子后端，独立基线目录需要在原相对位置。
 
-当前结果用于验证实现和训练通路。正式训练、多种子消融、CUDA 扩展和 CGAL P2F 验证仍待后续实验。
+## seed42 的双向 HD 诊断和 E2 消融
+
+交接记录中，E0 和 E3 都用三级 CD 从头训练 100 轮，以验证 patch 的 P3 CD 选最佳权重。E3 的 PU1K CD 下降 3.48%，平方 HD 上升 6.25%。下一轮先做 E2，即保留切向成对生成、将二次高度置零并从头训练。正式测试的 127 个物体由 ShapeNet 100 个和 PU-GAN 27 个组成。PU-GAN 在此处是子集，两个子集可分别比较。
+
+服务器从本仓库根目录进入实验目录，使用原来的训练环境和预处理数据。
+
+```bash
+cd /home/zk/Gaussian/our/PU-GCSNet
+conda activate scdata-v3
+bash run_e2.sh paired
+bash run_e2.sh validation
+bash run_e2.sh fps
+bash run_e2.sh train && bash run_e2.sh test
+```
+
+默认使用 GPU 0 和 `/home/zk/Gaussian/data`。可通过环境变量 `GPU` 和 `DATA_ROOT` 指定其他设备或数据根目录。长训练可在 tmux 会话中运行；中断后用 `bash run_e2.sh resume && bash run_e2.sh test` 从 E2 的 `latest.pth` 续训。E2 的训练、验证及测试权重记录在 `model/E2_PUGCSNet_seed42/`。
+
+| 命令 | 输出和用途 |
+|---|---|
+| `paired` | 读取 E0/E3 原有 `test/PU1K/input_2048/*.xyz` 和 GT。在 `model/diagnosis_seed42/E3_vs_E0/` 写入 `paired.csv` 和 `summary.json`。CSV 按候选模型相对参考模型的平方 HD 增量降序排列，正值表示退化。汇总给出每个子集的均值及改善、退化的物体数。 |
+| `validation` | 用固定 `val.h5` 对 E0 和同一 E3 权重的高度倍率 1、0.5、0 分别推断。每个目录的 `patches.csv` 可按 `patch_index` 配对，也可用 `split.json` 的 H5 行范围归回物体。`summary.json` 记录最佳权重的 epoch、验证 CD 和各列的 patch 均值。 |
+| `fps` | 根据 `paired` 的排序，在相同的前五个物体上分别重跑 E0/E3 推断。两个 `fps.csv` 给出 P2 和 P3 在 FPS 前、后的点数及方向误差。位移使用 FPS 前逐点对应的 P2/P3，在同一物体的四行中重复显示。 |
+| `train`、`test` | E2 与 E3 使用相同训练设置。测试阶段补出 E2 的验证 patch 指标、正式 127 个物体的指标，以及与 E0、E3 各自配对的报告。 |
+
+所有诊断距离均保存原始数值。CD、HD 用平方距离，P2→P3 位移用欧氏长度。正式整物体指标沿用预测和 GT 各自归一化的口径。FPS 诊断则用同一输入物体的中心和半径变换全部阶段与 GT。验证 patch 的 P95 先在每个 patch 内计算，汇总文件再对 patch 求均值。
+
+固定 E3 权重改变高度只用于诊断。在确定性成对采样中，两个子点得到相同的法向高度，因而高度项会移动这对点的中点。用 E2 的重新训练结果检验这条分支是否有增益。若后续需要验证二次形式本身的贡献，可再与直接预测一个有界标量高度的生成器对照。
+
+若预测→GT 的最坏距离增大，先用原始网格的 P2F 核实离面情况，再考虑对 P2 增加贴面监督。若 GT→预测的最坏距离增大，优先查看覆盖空洞以及 FPS 前后的变化。用验证集选择结构和高度设置，最终候选再用多个训练种子复核。重建 GT 的训练采样按三角形面积随机取点；如需报告输出均匀性，应另行测量点间距或均匀性指标。
 
 代码沿用 PU-CRN 的 Apache 2.0 许可证与原有第三方来源声明。基线论文为 Du et al., Point Cloud Upsampling via Cascaded Refinement Network, ACCV 2022。
