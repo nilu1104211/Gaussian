@@ -56,7 +56,7 @@ class ChamferLoss(torch.nn.Module):
     def unset_threshold(self):
         self.__threshold = None
 
-    def forward(self, pred, gt, radius, p_norm=2):
+    def forward(self, pred, gt, radius, p_norm=2, return_distances=False):
         assert(pred.dim() == 3 and gt.dim() == 3), \
             "input for ChamferLoss must be a 3D-tensor, but pred.size() is {} gt.size() is {}".format(pred.size(), gt.size())
 
@@ -92,12 +92,13 @@ class ChamferLoss(torch.nn.Module):
                 gt2pred < backward_threshold, gt2pred, torch.zeros_like(gt2pred))
 
 
+        point_distances = (pred2gt, gt2pred)
         pred2gt = torch.mean(pred2gt, dim=1)
         gt2pred = torch.mean(gt2pred, dim=1)
         CD_dist = 0.5 * pred2gt + 0.5* gt2pred
         cd_loss = CD_dist / radius
         cd_loss = torch.mean(CD_dist)
-        return cd_loss
+        return (cd_loss, *point_distances) if return_distances else cd_loss
 
 
 

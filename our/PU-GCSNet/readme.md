@@ -137,4 +137,18 @@ bash run_e2.sh train && bash run_e2.sh test
 
 若预测→GT 的最坏距离增大，先用原始网格的 P2F 核实离面情况，再考虑对 P2 增加贴面监督。若 GT→预测的最坏距离增大，优先查看覆盖空洞以及 FPS 前后的变化。用验证集选择结构和高度设置，最终候选再用多个训练种子复核。重建 GT 的训练采样按三角形面积随机取点；如需报告输出均匀性，应另行测量点间距或均匀性指标。
 
+## E6：HD-Guard
+
+E6 保留 E4 的生成器与 P2 贴面项，在 Stage-3 增加父点局部尺度限幅，并监督最终双向距离的尾部及 P2→P3 对应点的正向误差增长。第一轮运行一组 seed42、100 epoch，从头训练。设计公式、选模边界、Git 和服务器命令见 [HD 改进方案](HD改进方案_E6.md)。
+
+```bash
+bash run_hd_guard.sh all
+```
+
+该命令新建或续训 `model/E6_HDGuard_seed42`，随后测试 `best.pth` 与 `best_hd.pth`，保存正式/统一坐标配对结果。`VARIANT=tail` 和 `VARIANT=local` 是写入独立目录的后续消融，默认不会启动。旧 checkpoint 缺少新结构字段时使用 `legacy` 细化，新损失的 CLI 默认权重为零。
+
+新增参数为 `--refinement {legacy,local}`、`--refine_radius`、`--lambda_tail`、`--lambda_growth`、`--tail_fraction`、`--tail_warmup_epochs`。现在验证同时记录双向 HD；`best.pth` 继续由验证 CD 选择，`best_hd.pth` 另由验证 HD 选择并在续训中保留最优值。HD 选模结果作为补充，公平对照需要基线采用同样选模规则。
+
+`diagnose.py paired --shared-inputs INPUT_DIR ...` 可用输入点云的中心/半径统一变换预测与 GT；不提供该参数时保留原有分别归一化口径。
+
 代码沿用 PU-CRN 的 Apache 2.0 许可证与原有第三方来源声明。基线论文为 Du et al., Point Cloud Upsampling via Cascaded Refinement Network, ACCV 2022。

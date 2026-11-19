@@ -6,6 +6,7 @@ import numpy as np
 from torch import einsum
 from .point_ops import grouping_operation
 from .gaussian_surface_stage import GaussianSurfaceStage
+from .hd_guard import bound_refinement_offset
 
 
 
@@ -18,11 +19,19 @@ class CRNet(torch.nn.Module):
     Output:
         up_point: upsampled results, (B, 3, up_ratio * N_input)
     """
-    def __init__(self, up_ratio=4, stage2='quadratic', **geometry_options):
+    def __init__(self, up_ratio=4, stage2='quadratic', refinement='legacy',
+                 refine_radius=0.5, **geometry_options):
         super(CRNet, self).__init__()
         if up_ratio != 4:
             raise ValueError('PU-GCSNet currently supports 4x upsampling')
         self.stage2 = stage2
+        if refinement not in ('legacy', 'local'):
+            raise ValueError('Unknown refinement mode')
+        if refinement == 'local' and stage2 == 'baseline':
+            raise ValueError('Local refinement requires Stage-2 parent geometry')
+        if not np.isfinite(refine_radius) or refine_radius <= 0:
+            raise ValueError('refine_radius must be finite and positive')
+        self.refinement, self.refine_radius = refinement, refine_radius
         step_up_rate = int(np.sqrt(up_ratio))
         self.upsampling_stage_1 = SubNetwork(up_ratio = step_up_rate)
         self.upsampling_stage_2 = (SubNetwork(up_ratio=step_up_rate) if stage2 == 'baseline'
@@ -34,11 +43,22 @@ class CRNet(torch.nn.Module):
         point_cloud = point_cloud.float().contiguous() 
         p1_pred = self.upsampling_stage_1(point_cloud)
         aux = {}
-        if return_aux and self.stage2 != 'baseline':
+        if (return_aux or self.refinement == 'local') and self.stage2 != 'baseline':
             p2_pred, aux = self.upsampling_stage_2.forward_with_aux(p1_pred)
         else:
             p2_pred = self.upsampling_stage_2(p1_pred)
         p3_pred = self.refinement_stage(p2_pred) 
+        if self.refinement == 'local':
+            # Stage-2 flattens (parent, child), so each scale belongs to two
+            # consecutive children. This correspondence is preserved by Stage-3.
+            scale = aux['local_scale'].repeat_interleave(2, dim=1)
+            offset = (p3_pred - p2_pred).transpose(1, 2)
+            bounded, shrink = bound_refinement_offset(offset, scale, self.refine_radius)
+            p3_pred = p2_pred + bounded.transpose(1, 2)
+            if return_aux:
+                aux.update(refine_raw_move_over_d=offset.norm(dim=-1) / scale.squeeze(-1),
+                           refine_move_over_d=bounded.norm(dim=-1) / scale.squeeze(-1),
+                           refine_shrink=shrink.squeeze(-1))
 
         p3_pred = p3_pred.permute(0, 2, 1).contiguous()
         p2_pred = p2_pred.permute(0, 2, 1).contiguous()

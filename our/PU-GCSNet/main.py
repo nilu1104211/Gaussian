@@ -22,7 +22,8 @@ from utils import pc_utils
 
 
 NETWORK_KEYS = ('stage2', 'sampling', 'k', 'sigma_min', 'sigma_max',
-                'center_bound', 'normal_bound', 'height_bound', 'rho')
+                'center_bound', 'normal_bound', 'height_bound', 'rho',
+                'refinement', 'refine_radius')
 
 
 def parse_args():
@@ -73,12 +74,23 @@ def parse_args():
     parser.add_argument('--lambda_normal', type=float, default=0.0)
     parser.add_argument('--surf_eta', type=float, default=0.0)
     parser.add_argument('--confidence_tau', type=float, default=0.0)
+    parser.add_argument('--refinement', choices=('legacy', 'local'), default='legacy')
+    parser.add_argument('--refine_radius', type=float, default=0.5,
+                        help='Local refinement displacement bound in units of parent kNN scale')
+    parser.add_argument('--lambda_tail', type=float, default=0.0)
+    parser.add_argument('--lambda_growth', type=float, default=0.0)
+    parser.add_argument('--tail_fraction', type=float, default=0.02)
+    parser.add_argument('--tail_warmup_epochs', type=int, default=10)
     parser.add_argument('--save_stages', action='store_true', help='Save merged P1/P2 and P3 predictions')
     args = parser.parse_args()
     if min(args.batch_size, args.save_step, args.print_step, args.decay_iter, args.max_epoch) <= 0:
         parser.error('Batch size, epochs and step intervals must be positive')
     if min(args.lambda_surf, args.lambda_normal, args.surf_eta, args.confidence_tau) < 0:
         parser.error('Loss weights and confidence threshold must be nonnegative')
+    if (not np.isfinite([args.lambda_tail, args.lambda_growth, args.tail_fraction, args.refine_radius]).all()
+            or min(args.lambda_tail, args.lambda_growth, args.tail_warmup_epochs) < 0
+            or not 0 < args.tail_fraction <= 1 or args.refine_radius <= 0):
+        parser.error('HD-Guard requires finite nonnegative weights, fraction in (0,1], and positive radius')
     if args.lambda_normal and args.stage2 in ('baseline', 'gaussian3d'):
         parser.error('Normal loss requires tangent or quadratic Stage-2')
     if bool(args.val_data) != bool(args.val_gt):
@@ -99,6 +111,10 @@ def make_network(args, device, checkpoint=None):
     config = checkpoint.get('network_config') if checkpoint is not None else None
     if config is None:
         config = {key: getattr(args, key) for key in NETWORK_KEYS}
+    # Old E0-E4 checkpoints retain exactly the original refinement behavior.
+    config = dict(config)
+    config.setdefault('refinement', 'legacy')
+    config.setdefault('refine_radius', 0.5)
     net = PUGCSNet(args.up_ratio, **config).to(device)
     if checkpoint is not None:
         net.load_state_dict(checkpoint['net_state_dict'])
@@ -117,10 +133,10 @@ def warm_start(net, path, device):
     logging.info('Warm start loaded %d tensors; initialized %d new tensors', len(matching), len(current) - len(matching))
 
 
-def save_checkpoint(path, net, model, config, epoch, steps, best, args):
+def save_checkpoint(path, net, model, config, epoch, steps, best, args, best_hd=float('inf')):
     state = dict(net_state_dict=net.state_dict(), network_config=config,
                  optimizer=model.optimizer.state_dict(), scheduler=model.lr_scheduler.state_dict(),
-                 epoch=epoch, steps=steps, best_val=best, args=vars(args),
+                 epoch=epoch, steps=steps, best_val=best, best_hd_val=best_hd, args=vars(args),
                  torch_rng=torch.get_rng_state(), numpy_rng=np.random.get_state(),
                  python_rng=random.getstate(), cuda_rng=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [])
     temporary = path.with_suffix('.tmp')
@@ -132,18 +148,22 @@ def save_checkpoint(path, net, model, config, epoch, steps, best, args):
 def validate_patches(net, loader, device):
     net.eval()
     metric = CD_dist()
-    totals = np.zeros(2)
+    totals = {}
     count = 0
     for inputs, target, _ in loader:
         inputs, target = inputs.to(device), target.to(device).transpose(1, 2)
         final, aux = net(inputs, return_aux=True)
-        for j, pred in enumerate((aux['p2'], final)):
+        for stage, pred in ((2, aux['p2']), (3, final)):
             forward, backward = metric(pred, target)
-            totals[j] += (forward.mean(-1) + backward.mean(-1)).sum().item()
+            values = distance_metrics(forward, backward)
+            for label, key in (('cd', 'CD'), ('hd', 'HD_squared'),
+                               ('hd_forward', 'HD_pred_to_gt_sq'), ('hd_backward', 'HD_gt_to_pred_sq')):
+                name = f'{label}{stage}'
+                totals[name] = totals.get(name, 0.0) + values[key].sum().item()
         count += len(inputs)
     if count == 0:
         raise ValueError('Empty validation dataset')
-    return dict(cd2=totals[0] / count, cd3=totals[1] / count)
+    return {name: total / count for name, total in totals.items()}
 
 
 def train(args, device):
@@ -159,6 +179,12 @@ def train(args, device):
     if resume_path and args.init_ckpt:
         raise ValueError('Choose resume or initialization checkpoint')
     saved = checkpoint_state(resume_path, device) if resume_path else None
+    if saved is not None and 'lambda_tail' in saved.get('args', {}):
+        # A new objective is an initialization experiment, not an exact resume.
+        for key in ('lambda_tail', 'lambda_growth', 'tail_fraction', 'tail_warmup_epochs',
+                    'lambda_surf', 'lambda_normal', 'surf_eta', 'gt_k', 'confidence_tau'):
+            if getattr(args, key) != saved['args'][key]:
+                raise ValueError(f'Resume must preserve {key}={saved["args"][key]}; use the original run command')
     net, config = make_network(args, device, saved)
     if args.lambda_normal and config['stage2'] in ('baseline', 'gaussian3d'):
         raise ValueError('Checkpoint architecture does not provide supervised normals')
@@ -186,13 +212,14 @@ def train(args, device):
     if not args.val_h5 and not args.val_data:
         logging.info('No validation supplied; saving epoch checkpoints only')
     model = Model(net, 'train', args)
-    steps, start_epoch, best = 0, 1, float('inf')
+    steps, start_epoch, best, best_hd = 0, 1, float('inf'), float('inf')
     if saved is not None:
         if 'optimizer' in saved:
             model.optimizer.load_state_dict(saved['optimizer'])
             model.lr_scheduler.load_state_dict(saved['scheduler'])
         steps, start_epoch = saved.get('steps', 0), saved.get('epoch', args.restore_epoch) + 1
         best = saved.get('best_val', best)
+        best_hd = saved.get('best_hd_val', best_hd)
         if 'torch_rng' in saved:
             torch.set_rng_state(saved['torch_rng'].cpu())
             np.random.set_state(saved['numpy_rng'])
@@ -224,22 +251,28 @@ def train(args, device):
                     scores = validate_patches(net, val_loader, device)
                 elif args.val_data:
                     target_folder = test(args, net, device, args.val_data, folder / 'validation')
-                    scores = dict(cd3=evaluate(target_folder, args.val_gt)['CD'])
+                    values = evaluate(target_folder, args.val_gt)
+                    scores = dict(cd3=values['CD'], hd3=values['HD_squared'],
+                                  hd_forward3=values['HD_pred_to_gt_sq'], hd_backward3=values['HD_gt_to_pred_sq'])
                 torch.set_rng_state(torch_rng)
                 np.random.set_state(numpy_rng)
                 random.setstate(python_rng)
                 if cuda_rng:
                     torch.cuda.set_rng_state_all(cuda_rng)
                 improved = scores is not None and scores['cd3'] < best
+                improved_hd = scores is not None and scores['hd3'] < best_hd
                 if scores is not None:
                     best = min(best, scores['cd3'])
+                    best_hd = min(best_hd, scores['hd3'])
                     logging.info('Validation epoch %d: %s', epoch, scores)
                     log.write(json.dumps(dict(epoch=epoch, validation=scores)) + '\n')
                     log.flush()
                 if improved:
-                    save_checkpoint(folder / 'best.pth', net, model, config, epoch, steps, best, args)
-                save_checkpoint(folder / ('model_%d.pth' % epoch), net, model, config, epoch, steps, best, args)
-                save_checkpoint(folder / 'latest.pth', net, model, config, epoch, steps, best, args)
+                    save_checkpoint(folder / 'best.pth', net, model, config, epoch, steps, best, args, best_hd)
+                if improved_hd:
+                    save_checkpoint(folder / 'best_hd.pth', net, model, config, epoch, steps, best, args, best_hd)
+                save_checkpoint(folder / ('model_%d.pth' % epoch), net, model, config, epoch, steps, best, args, best_hd)
+                save_checkpoint(folder / 'latest.pth', net, model, config, epoch, steps, best, args, best_hd)
             if args.max_steps and steps >= args.max_steps:
                 break
 

@@ -14,6 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from network.point_ops import furthest_point_sample, gather_operation
 from network.geometry_losses import gt_geometry, surface_loss, normal_loss
+from network.hd_guard import refinement_tail_losses
 
 
 
@@ -25,6 +26,10 @@ class Model(object):
         self.lambda_surf = getattr(opt, 'lambda_surf', 0.0)
         self.lambda_normal = getattr(opt, 'lambda_normal', 0.0)
         self.surf_eta = getattr(opt, 'surf_eta', 0.0)
+        self.lambda_tail = getattr(opt, 'lambda_tail', 0.0)
+        self.lambda_growth = getattr(opt, 'lambda_growth', 0.0)
+        self.tail_fraction = getattr(opt, 'tail_fraction', 0.02)
+        self.tail_warmup_epochs = getattr(opt, 'tail_warmup_epochs', 10)
         self.last_metrics = {}
 
         if self.phase == 'train':
@@ -79,8 +84,14 @@ class Model(object):
         gt_downsample_idx = furthest_point_sample(self.gt.permute(0, 2, 1).contiguous(), P1.shape[1])
         gt_downsample = gather_operation(self.gt, gt_downsample_idx)
         cd_1 =  self.compute_chamfer_loss(P1, gt_downsample) 
-        cd_2 =  self.compute_chamfer_loss(P2, self.gt) 
-        cd_3 =  self.compute_chamfer_loss(P3, self.gt) 
+        tail_enabled = self.lambda_tail > 0 or self.lambda_growth > 0
+        if tail_enabled:
+            # Reuse CD nearest-neighbor matches; do not run another NN search.
+            cd_2, p2_forward, _ = self.compute_chamfer_loss(P2, self.gt, return_distances=True)
+            cd_3, p3_forward, p3_backward = self.compute_chamfer_loss(P3, self.gt, return_distances=True)
+        else:
+            cd_2 = self.compute_chamfer_loss(P2, self.gt)
+            cd_3 = self.compute_chamfer_loss(P3, self.gt)
         loss = cd_1 + cd_2 + cd_3 
         losses = [cd_1, cd_2, cd_3]
 
@@ -100,12 +111,34 @@ class Model(object):
         weighted_surf = self.lambda_surf * (surf2 + self.surf_eta * surf3)
         weighted_normal = self.lambda_normal * normals_loss
         loss = loss + weighted_surf + weighted_normal
+        tail_metrics = {key: loss.new_zeros(()) for key in
+                        ('tail_forward', 'tail_backward', 'tail', 'tail_growth')}
+        if tail_enabled:
+            tail_metrics = refinement_tail_losses(p2_forward, p3_forward, p3_backward, self.tail_fraction)
+        ramp = (min(1.0, max(0.0, float(epoch or 1)) / self.tail_warmup_epochs)
+                if self.tail_warmup_epochs > 0 else 1.0)
+        weighted_tail = ramp * self.lambda_tail * tail_metrics['tail']
+        weighted_growth = ramp * self.lambda_growth * tail_metrics['tail_growth']
+        loss = loss + weighted_tail + weighted_growth
 
         with torch.no_grad():
             metrics = dict(cd1=cd_1, cd2=cd_2, cd3=cd_3, surf2=surf2, surf3=surf3,
                            normal=normals_loss, weighted_surf=weighted_surf,
                            weighted_normal=weighted_normal, total=loss,
                            refinement_move=(P3 - P2).norm(dim=-1).mean())
+            metrics.update(tail_metrics, weighted_tail=weighted_tail, weighted_growth=weighted_growth,
+                           tail_ramp=loss.new_tensor(ramp))
+            if tail_enabled:
+                metrics.update(train_hd3=torch.maximum(p3_forward.amax(1), p3_backward.amax(1)).mean(),
+                               train_hd3_forward=p3_forward.amax(1).mean(),
+                               train_hd3_backward=p3_backward.amax(1).mean())
+            if 'refine_shrink' in self.aux:
+                metrics.update(refine_move_over_d=self.aux['refine_move_over_d'].mean(),
+                               refine_move_over_d_max=self.aux['refine_move_over_d'].amax(),
+                               refine_raw_move_over_d=self.aux['refine_raw_move_over_d'].mean(),
+                               refine_shrink_mean=self.aux['refine_shrink'].mean(),
+                               refine_over_radius_fraction=(self.aux['refine_raw_move_over_d'] >
+                                                            self.net.refine_radius).float().mean())
             if self.aux:
                 d = self.aux['local_scale']
                 metrics['center_move_over_d'] = ((self.aux['mu'] - P1).norm(dim=-1, keepdim=True) / d).mean()
@@ -128,10 +161,10 @@ class Model(object):
         lr = self.get_lr(self.optimizer)
         return losses, lr
 
-    def compute_chamfer_loss(self, pc, pc_label):
+    def compute_chamfer_loss(self, pc, pc_label, return_distances=False):
 
         loss_chamfer = self.chamfer_criteria(
             pc.transpose(1, 2).contiguous(),
-            pc_label.transpose(1, 2).contiguous(), self.radius)
+            pc_label.transpose(1, 2).contiguous(), self.radius, return_distances=return_distances)
 
         return loss_chamfer

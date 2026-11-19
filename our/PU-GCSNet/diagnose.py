@@ -43,15 +43,33 @@ def paired(args):
         raise ValueError(f'Invalid PU-GAN subset in {args.pugan_meshes}; unmatched names: {sorted(pugan - names)}')
     if args.expected_counts and [len(names), len(pugan)] != args.expected_counts:
         raise ValueError(f'Expected PU1K/PU-GAN counts {args.expected_counts}, found {len(names)}/{len(pugan)}')
+    shared_inputs = getattr(args, 'shared_inputs', None)
+    if shared_inputs and xyz_names(shared_inputs) != names:
+        raise ValueError('Shared input names must match the evaluated shapes')
 
     metric = CD_dist()
     rows = []
     for name in sorted(names):
         filename = name + '.xyz'
-        gt = unit_cloud(args.gt / filename)
+        if shared_inputs:
+            inputs = np.loadtxt(shared_inputs / filename, dtype=np.float32, ndmin=2)[:, :3]
+            if inputs.shape[1] != 3 or not np.isfinite(inputs).all():
+                raise ValueError(f'Invalid input cloud: {shared_inputs / filename}')
+            _, center, radius = pc_utils.normalize_point_cloud(inputs[None])
+            if not np.isfinite(radius).all() or (radius <= 0).any():
+                raise ValueError(f'Degenerate input cloud: {shared_inputs / filename}')
+
+            def load_cloud(path):
+                xyz = np.loadtxt(path, dtype=np.float32, ndmin=2)[:, :3]
+                if xyz.shape[1] != 3 or not np.isfinite(xyz).all():
+                    raise ValueError(f'Invalid XYZ cloud: {path}')
+                return torch.as_tensor((xyz[None] - center) / radius, dtype=torch.float32)
+        else:
+            load_cloud = unit_cloud
+        gt = load_cloud(args.gt / filename)
         row = dict(name=name, subset='PU-GAN' if name in pugan else 'ShapeNet')
         for label, folder in [('reference', args.reference), ('candidate', args.candidate)]:
-            cloud = unit_cloud(folder / filename)
+            cloud = load_cloud(folder / filename)
             if cloud.shape != gt.shape:
                 raise ValueError(f'{folder / filename}: expected {gt.shape[1]} points, got {cloud.shape[1]}')
             values = distance_metrics(*metric(cloud, gt))
@@ -75,7 +93,8 @@ def paired(args):
                               worsened=int((delta > 0).sum()))
         groups[group] = stats
     save_report(args.out, 'paired.csv', rows, dict(reference=str(args.reference), candidate=str(args.candidate),
-                coordinates='independent unit spheres (official project scores)', groups=groups))
+                coordinates=('input centroid and radius shared by both predictions and GT' if shared_inputs
+                             else 'independent unit spheres (official project scores)'), groups=groups))
 
 
 def load_model(args):
@@ -167,6 +186,8 @@ def main():
     for name in ('reference', 'candidate', 'gt', 'pugan-meshes'):
         pair.add_argument('--' + name, type=Path, required=True)
     pair.add_argument('--expected-counts', type=int, nargs=2, metavar=('PU1K', 'PUGAN'))
+    pair.add_argument('--shared-inputs', type=Path,
+                      help='Use this input cloud center/radius for both predictions and GT')
     patch = commands.add_parser('patches', help='Evaluate fixed held-out patches in H5 row order')
     patch.add_argument('--val-h5', type=Path, required=True)
     patch.add_argument('--batch-size', type=int, default=16)
