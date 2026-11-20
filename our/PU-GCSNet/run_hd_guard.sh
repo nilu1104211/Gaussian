@@ -2,21 +2,34 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+action="${1:-all}"
+case "$action" in
+    ablations)
+        for experiment in tail local no_growth; do
+            echo "[$(date)] Starting HD-Guard ablation: $experiment"
+            VARIANT="$experiment" bash ./run_hd_guard.sh all
+        done
+        echo "[$(date)] HD-Guard ablations complete."
+        exit 0
+        ;;
+    all|train|resume|test) ;;
+    *) echo 'Usage: bash run_hd_guard.sh [all|train|resume|test|ablations]' >&2; exit 2 ;;
+esac
+
 data_root="${DATA_ROOT:-/home/zk/Gaussian/data}"
 gpu="${GPU:-0}"
 seed="${SEED:-42}"
 epochs="${EPOCHS:-100}"
 variant="${VARIANT:-full}"
 case "$variant" in
-    full)  name="E6_HDGuard_seed${seed}"; refinement=local; tail=0.05; growth=0.05 ;;
-    tail)  name="E6_HDGuard_tail_seed${seed}"; refinement=legacy; tail=0.05; growth=0.05 ;;
-    local) name="E6_HDGuard_local_seed${seed}"; refinement=local; tail=0; growth=0 ;;
-    *) echo 'VARIANT must be full, tail, or local' >&2; exit 2 ;;
+    full)      name="E6_HDGuard_seed${seed}"; refinement=local; tail=0.05; growth=0.05 ;;
+    tail)      name="E6_HDGuard_tail_seed${seed}"; refinement=legacy; tail=0.05; growth=0.05 ;;
+    local)     name="E6_HDGuard_local_seed${seed}"; refinement=local; tail=0; growth=0 ;;
+    no_growth) name="E6_HDGuard_no_growth_seed${seed}"; refinement=local; tail=0.05; growth=0 ;;
+    *) echo 'VARIANT must be full, tail, local, or no_growth' >&2; exit 2 ;;
 esac
 run="model/$name"
 test_root="$data_root/PU1K/PU1K/test/input_2048"
-action="${1:-all}"
-case "$action" in all|train|resume|test) ;; *) echo 'Usage: bash run_hd_guard.sh [all|train|resume|test]' >&2; exit 2 ;; esac
 mkdir -p "$run"
 # Prevent two invocations from writing the same experiment simultaneously.
 exec 9>"$run/.run.lock"
@@ -51,7 +64,11 @@ test_run() {
         --num_point 256 --num_shape_point 2048 --patch_num_ratio 3 --random_seed 42 \
         --save_stages --result_dir "$run/$destination/PU1K"
     local label ref protocol
-    for label in E0_PUCRN E4_PUGCSNet; do
+    local references=(E0_PUCRN E4_PUGCSNet)
+    if [[ "$variant" != full && "$destination" == test ]]; then
+        references+=(E6_HDGuard)
+    fi
+    for label in "${references[@]}"; do
         ref="model/${label}_seed${seed}/test/PU1K/input_2048"
         if [[ ! -d "$ref" ]]; then
             echo "Skipping paired report: reference $ref is not available."

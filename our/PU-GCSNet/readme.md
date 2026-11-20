@@ -145,7 +145,13 @@ E6 保留 E4 的生成器与 P2 贴面项，在 Stage-3 增加父点局部尺度
 bash run_hd_guard.sh all
 ```
 
-该命令新建或续训 `model/E6_HDGuard_seed42`，随后测试 `best.pth` 与 `best_hd.pth`，保存正式/统一坐标配对结果。`VARIANT=tail` 和 `VARIANT=local` 是写入独立目录的后续消融，默认不会启动。旧 checkpoint 缺少新结构字段时使用 `legacy` 细化，新损失的 CLI 默认权重为零。
+该命令新建或续训 `model/E6_HDGuard_seed42`，随后测试 `best.pth` 与 `best_hd.pth`，保存正式和统一坐标配对结果。旧 checkpoint 缺少新结构字段时使用 `legacy` 细化，新损失的 CLI 默认权重为零。
+
+```bash
+bash run_hd_guard.sh ablations
+```
+
+该命令依次完成 `tail`、`local`、`no_growth` 的训练和测试，每组使用独立目录。前一组失败时队列停止。重新执行时从各组已有的 `latest.pth` 续训并执行测试。需要单独运行其中一组时，在 `bash run_hd_guard.sh all` 前设置对应的 `VARIANT`。消融组按 CD 选出的权重也会与完整 E6 的同种子结果配对。 [消融设置](HD改进方案_E6.md#消融队列)
 
 新增参数为 `--refinement {legacy,local}`、`--refine_radius`、`--lambda_tail`、`--lambda_growth`、`--tail_fraction`、`--tail_warmup_epochs`。现在验证同时记录双向 HD；`best.pth` 继续由验证 CD 选择，`best_hd.pth` 另由验证 HD 选择并在续训中保留最优值。HD 选模结果作为补充，公平对照需要基线采用同样选模规则。
 

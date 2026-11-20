@@ -118,14 +118,19 @@ nohup bash run_hd_guard.sh all > "model/hdguard_resume_$(date +%Y%m%d_%H%M%S).lo
 
 只补测试：`bash run_hd_guard.sh test`。`train` 仅允许新实验，`resume` 只续训；两者不自动测试。
 
-预留的独立消融，当前无需一起启动：
+### 消融队列
 
 ```bash
-# 保留原细化，仅加入尾部监督，写入独立目录。
-VARIANT=tail bash run_hd_guard.sh all
-# 仅加入局部位移限幅，保留 E4 损失，写入独立目录。
-VARIANT=local bash run_hd_guard.sh all
+bash run_hd_guard.sh ablations
 ```
+
+| 顺序 | `VARIANT` | 细化 | P3 双向尾部权重 | P2→P3 逐点误差增长权重 |
+|---|---|---|---:|---:|
+| 1 | `tail` | 原细化 | 0.05 | 0.05 |
+| 2 | `local` | 局部位移限幅 | 0 | 0 |
+| 3 | `no_growth` | 局部位移限幅 | 0.05 | 0 |
+
+三组沿用 E4 的 P2 贴面项和相同训练预算。默认 seed 42、100 轮，分别写入 `model/E6_HDGuard_tail_seed42`、`model/E6_HDGuard_local_seed42`、`model/E6_HDGuard_no_growth_seed42`。每组训练和两套权重的测试完成后才开始下一组。出现 `HD-Guard ablations complete` 表示三组均完成。队列中断后可以再次运行原命令，已有训练权重会被继续使用，测试会重新执行。
 
 ## 8. 结果文件
 
