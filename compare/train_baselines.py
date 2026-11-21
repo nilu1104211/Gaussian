@@ -54,7 +54,8 @@ def train_model(model, epochs, batch_size, seed, train, val, run_dir, env, smoke
     command = [sys.executable, '-u', 'train.py', '--dataset', 'pu1k', '--best_only',
                '--batch_size', str(batch_size), *args]
     logfile = destination / 'train.log'
-    print(f'[{datetime.now():%F %T}] Starting {model} ({epochs} epochs): {logfile}', flush=True)
+    print(f'[{datetime.now():%F %T}] Starting {model} ({epochs} epochs, batch size {batch_size}): {logfile}',
+          flush=True)
     with logfile.open('w', encoding='utf-8') as stream:
         stream.write(shlex.join(command) + '\n')
         stream.flush()
@@ -88,15 +89,15 @@ def run_queue(args):
     run_dir = COMPARE / 'training-runs' / f'pu1k-{label}-seed{args.seed}-{datetime.now():%Y%m%d-%H%M%S-%f}'
     run_dir.mkdir(parents=True)
     print(f'Run directory: {run_dir}', flush=True)
+    batch = args.batch_size
     if args.smoke:
-        batch = min(4, args.batch_size)
         small_train = run_dir / 'train.h5'
         small_val = run_dir / 'val.h5'
         subset_patches(train, small_train, batch)
         subset_patches(val, small_val, batch)
         epochs = (2, 1, 1)
     else:
-        batch, epochs = args.batch_size, args.epochs
+        epochs = args.epochs
         small_train, small_val = train, val
 
     first = MODELS.index(args.start_at)
@@ -114,12 +115,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data-root', type=Path, default=COMPARE.parent / 'data')
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--batch-size', type=int, default=8)
+    parser.add_argument('--batch-size', type=int, default=16, help='Batch size for each model (default: %(default)s)')
     parser.add_argument('--epochs', type=int, nargs=3, default=(200, 60, 100),
                         metavar=('PU_GAUSSIAN', 'GRAD_PU', 'REPKPU'))
     parser.add_argument('--start-at', choices=MODELS, default=MODELS[0],
                         help='Start a new queue at this model and skip earlier models')
-    parser.add_argument('--smoke', action='store_true', help='Run a few batches and check saved weights')
+    parser.add_argument('--smoke', action='store_true', help='Run one batch per epoch at the selected batch size')
     args = parser.parse_args()
     if not (0 <= args.seed < 2 ** 32) or min(args.batch_size, *args.epochs) < 1:
         parser.error('Use a valid NumPy seed, a positive batch size and positive epoch counts')
