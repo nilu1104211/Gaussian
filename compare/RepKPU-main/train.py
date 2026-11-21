@@ -46,7 +46,6 @@ def upsampling(args, model, input_pcd):
     return coarse_pts
 
 def train(model, args):
-    set_seed(args.seed)
     start = time.time()
 
     # dataloader
@@ -55,6 +54,13 @@ def train(model, args):
                                                    shuffle=True,
                                                    batch_size=args.batch_size,
                                                    num_workers=args.num_workers)
+    valid_loader = None
+    if getattr(args, 'val_h5_path', None):
+        valid_args = argparse.Namespace(**vars(args))
+        valid_args.h5_file_path = args.val_h5_path
+        valid_args.data_augmentation = valid_args.use_random_input = False
+        valid_loader = torch.utils.data.DataLoader(
+            PUDataset(valid_args), batch_size=args.batch_size)
 
     # set up folders for checkpoints and logs
     str_time = datetime.now().isoformat()
@@ -63,7 +69,9 @@ def train(model, args):
     if not os.path.exists(ckpt_dir):
         os.makedirs(ckpt_dir)
     log_dir = os.path.join(output_dir, 'log')
-    if not os.path.exists(log_dir):
+    if getattr(args, 'best_only', False):
+        log_dir = None
+    elif not os.path.exists(log_dir):
         os.makedirs(log_dir)
     
     logger = get_logger('train', log_dir)
@@ -93,7 +101,7 @@ def train(model, args):
     
     logger.info(args)
     logger.info('========== Begin Training ==========')
-    best_cd = 10000
+    best_cd = float('inf')
     
     
     for epoch in range(args.epochs):
@@ -129,16 +137,33 @@ def train(model, args):
         # log
         interval = time.time() - start
         
-        cd_now = val(model, args)
+        cd_now = validation_patch_cd(model, valid_loader) if valid_loader is not None else val(model, args)
+        if not np.isfinite([epoch_loss, cd_now]).all():
+            raise FloatingPointError(f'Nonfinite loss at epoch {epoch + 1}')
         if cd_now < best_cd:
             best_cd = cd_now
             model_name = 'ckpt-best.pth'
             model_path = os.path.join(ckpt_dir, model_name)
-            torch.save(model.state_dict(), model_path)
+            torch.save(model.state_dict(), model_path + '.tmp')
+            os.replace(model_path + '.tmp', model_path)
+            logger.info('Best checkpoint updated at epoch %d: %s', epoch + 1, model_path)
 
         logger.info("epoch: %d/%d, avg epoch loss: %f, cd_last: %f, cd_best: %f, time: %d mins %.1f secs" %
           (epoch + 1, args.epochs, epoch_loss / len(train_loader), cd_now, best_cd, interval / 60, interval % 60))
         
+
+@torch.no_grad()
+def validation_patch_cd(model, loader):
+    model.eval()
+    total, count = 0.0, 0
+    for points, target, _ in loader:
+        points = points.float().cuda().transpose(1, 2).contiguous()
+        prediction, _ = model(points)
+        size = len(points)
+        total += size * chamfer_sqrt(prediction.transpose(1, 2).contiguous(), target.float().cuda()).item()
+        count += size
+    return total / count * 1000
+
 
 def val(model, args):
     with torch.no_grad():
@@ -171,12 +196,12 @@ def val(model, args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Training Arguments')
     parser.add_argument('--dataset', default='pu1k', type=str, help='pu1k or pugan')
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
     if args.dataset == 'pu1k':
         reset_model_args(parse_pu1k_args(), args)
     else:
         reset_model_args(parse_pugan_args(), args)
     
-    # 
+    set_seed(args.seed)
     model = RepKPU(args)
     train(model, args)

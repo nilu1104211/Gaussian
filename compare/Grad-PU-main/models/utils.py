@@ -180,17 +180,19 @@ def get_logger(name, log_dir):
     stream_handler.setFormatter(formatter)
     logger.addHandler(stream_handler)
     # output to log file
-    log_name = name + '_log.txt'
-    file_handler = logging.FileHandler(os.path.join(log_dir, log_name))
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+    if log_dir is not None:
+        log_name = name + '_log.txt'
+        file_handler = logging.FileHandler(os.path.join(log_dir, log_name))
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
 
     return logger
 
 
-def get_query_points(input_pts, args):
-    query_pts = input_pts + (torch.randn_like(input_pts) * args.local_sigma)
+def get_query_points(input_pts, args, generator=None):
+    noise = torch.randn(input_pts.shape, dtype=input_pts.dtype, device=input_pts.device, generator=generator)
+    query_pts = input_pts + (noise * args.local_sigma)
 
     return query_pts
 

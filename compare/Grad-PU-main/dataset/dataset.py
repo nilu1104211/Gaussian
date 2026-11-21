@@ -4,10 +4,11 @@ from dataset.utils import *
 
 
 class PUDataset(data.Dataset):
-    def __init__(self, args):
+    def __init__(self, args, augment=True):
         super(PUDataset, self).__init__()
 
         self.args = args
+        self.augment = augment
         # input and gt: (b, n, 3) radius: (b, 1)
         self.input_data, self.gt_data, self.radius_data = load_h5_data(args)
 
@@ -22,12 +23,12 @@ class PUDataset(data.Dataset):
         if self.args.use_random_input:
             sample_idx = nonuniform_sampling(input.shape[0], sample_num=self.args.num_points)
             input = input[sample_idx, :]
-        # data augmentation
-        if self.args.use_random_input:
-            input = jitter_perturbation_point_cloud(input, sigma=self.args.jitter_sigma, clip=self.args.jitter_max)
-        input, gt = rotate_point_cloud_and_gt(input, gt)
-        input, gt, scale = random_scale_point_cloud_and_gt(input, gt, scale_low=0.8, scale_high=1.2)
-        radius = radius * scale
+        if self.augment:
+            if self.args.use_random_input:
+                input = jitter_perturbation_point_cloud(input, sigma=self.args.jitter_sigma, clip=self.args.jitter_max)
+            input, gt = rotate_point_cloud_and_gt(input, gt)
+            input, gt, scale = random_scale_point_cloud_and_gt(input, gt, scale_low=0.8, scale_high=1.2)
+            radius = radius * scale
         # ndarray -> tensor
         input = torch.from_numpy(input)
         gt = torch.from_numpy(gt)

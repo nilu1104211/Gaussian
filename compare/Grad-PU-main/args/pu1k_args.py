@@ -5,7 +5,7 @@ from args.utils import str2bool
 def parse_pu1k_args():
     parser = argparse.ArgumentParser(description='Model Arguments')
     # seed
-    parser.add_argument('--seed', default=21, type=float, help='seed')
+    parser.add_argument('--seed', default=21, type=int, help='seed')
     # optimizer
     parser.add_argument('--optim', default='adam', type=str, help='optimizer, adam or sgd')
     parser.add_argument('--lr', default=1e-3, type=float, help='learning rate')
@@ -16,6 +16,8 @@ def parse_pu1k_args():
     # dataset
     parser.add_argument('--dataset', default='pu1k', type=str, help='pu1k or pugan')
     parser.add_argument('--h5_file_path', default="./data/PU1K/train/pu1k_poisson_256_poisson_1024_pc_2500_patch50_addpugan.h5", type=str, help='the path of train dataset')
+    parser.add_argument('--val_h5_path', help='Shape-disjoint validation H5 for distance regression')
+    parser.add_argument('--best_only', action='store_true', help='Keep one best checkpoint and use console logs')
     parser.add_argument('--num_points', default=256, type=int, help='the points number of each input patch')
     parser.add_argument('--skip_rate', default=1, type=int, help='used for dataset')
     parser.add_argument('--use_random_input', default=False, type=str2bool, help='whether use random sampling for input generation')

@@ -142,11 +142,12 @@ def get_logger(name, log_dir):
     stream_handler.setFormatter(formatter)
     logger.addHandler(stream_handler)
     # output to log file
-    log_name = name + '_log.txt'
-    file_handler = logging.FileHandler(os.path.join(log_dir, log_name))
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+    if log_dir is not None:
+        log_name = name + '_log.txt'
+        file_handler = logging.FileHandler(os.path.join(log_dir, log_name))
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
 
     return logger
 

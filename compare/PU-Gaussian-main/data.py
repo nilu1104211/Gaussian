@@ -9,19 +9,24 @@ class PUDataset(data.Dataset):
         super(PUDataset, self).__init__()
 
         self.args = args
-        # input and gt: (b, n, 3) radius: (b, 1)
-        self.input_data, self.gt_data, self.radius_data, self.val, self.x6 = load_h5_data(args)
+        with h5py.File(args.h5_file_path, 'r') as file:
+            compact = 'sampled_surfaces' in file
+        self.compact = CompactTargets(args) if compact else None
+        if self.compact is None:
+            self.input_data, self.gt_data, self.radius_data, self.val, self.x6 = load_h5_data(args)
 
     def __len__(self):
-        return self.input_data.shape[0]
+        return len(self.compact) if self.compact is not None else self.input_data.shape[0]
 
     def __getitem__(self, index):
-        # (n, 3)
-        input = self.input_data[index]
-        gt = self.gt_data[index]
-        radius = self.radius_data[index]
-        val = self.val[index]
-        x6 = self.x6[index]
+        if self.compact is not None:
+            input, gt, radius, val, x6 = self.compact[index]
+        else:
+            input = self.input_data[index]
+            gt = self.gt_data[index]
+            radius = self.radius_data[index]
+            val = self.val[index]
+            x6 = self.x6[index]
         if self.args.use_random_input:
             sample_idx = nonuniform_sampling(input.shape[0], sample_num=self.args.num_points)
             input = input[sample_idx, :]
@@ -41,6 +46,36 @@ class PUDataset(data.Dataset):
         x6 = torch.from_numpy(x6)
 
         return input, gt, radius, val, x6
+
+
+class CompactTargets:
+    def __init__(self, args):
+        self.path = args.h5_file_path
+        self.input_key = 'poisson_1024' if args.use_random_input else 'poisson_256'
+        self.file = None
+        with h5py.File(self.path, 'r') as file:
+            self.surfaces = file['sampled_surfaces'][:]
+            self.rows = range(0, len(file['patch_mesh']), args.skip_rate)
+
+    def __len__(self):
+        return len(self.rows)
+
+    def __getitem__(self, index):
+        if self.file is None:
+            self.file = h5py.File(self.path, 'r')
+            self.inputs = self.file[self.input_key]
+            self.targets = self.file['poisson_1024']
+            self.meshes = self.file['patch_mesh']
+            self.indices = self.file['patch_surface_indices']
+        row = self.rows[index]
+        points = self.inputs[row]
+        target = self.targets[row]
+        extra = self.surfaces[self.meshes[row], self.indices[row]]
+        center = points.mean(axis=0)
+        points -= center
+        radius = max(float(np.linalg.norm(points, axis=-1).max()), 1e-8)
+        dense = (np.concatenate((target, extra)) - center) / radius
+        return points / radius, dense, np.ones(1), dense[:1024], dense[:1536]
 
 
 

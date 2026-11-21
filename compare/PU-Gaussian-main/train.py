@@ -9,6 +9,8 @@ from tqdm import tqdm
 from collections import defaultdict
 from sklearn.model_selection import train_test_split
 import numpy as np
+import h5py
+import random
 import sys
 import os
 from datetime import datetime
@@ -39,6 +41,16 @@ def _normalize_point_cloud(pc):
 def get_timestamp():
     """Get current timestamp in format suitable for filenames."""
     return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+
+def validation_dataset(path):
+    with h5py.File(path, 'r') as file:
+        input_points = torch.from_numpy(file['poisson_256'][:]).float()
+        targets = torch.from_numpy(file['poisson_1024'][:]).float()
+    center = input_points.mean(dim=1, keepdim=True)
+    input_points -= center
+    radius = input_points.norm(dim=-1).amax(dim=1).view(-1, 1, 1).clamp_min(1e-8)
+    return torch.utils.data.TensorDataset(input_points / radius, (targets - center) / radius)
 
 
 
@@ -225,6 +237,9 @@ def train():
     
     # Use configurations from args
     config = confg.args
+    random.seed(config.random_seed)
+    np.random.seed(config.random_seed)
+    torch.manual_seed(config.random_seed)
     
     # Initialize model
     network_name = "PU_Gaussian"  # Change this to use different models #best model pu_gau2 with kernel loss
@@ -238,10 +253,11 @@ def train():
     # Create a descriptive log directory name
     timestamp = get_timestamp()
     log_desc = f"{network_name}_{config.dataset}_{config.num_samples}x_{config.up_ratio}x_{config.distribution}_{timestamp}"
-    log_dir = f"logs/{timestamp}_{log_desc}"
+    log_dir = os.path.join(config.tensorboard_dir, f"{timestamp}_{log_desc}")
+    os.makedirs(config.model_dir, exist_ok=True)
     
     # Initialize TensorBoard writer
-    writer = SummaryWriter(log_dir=log_dir)
+    writer = None if config.best_only else SummaryWriter(log_dir=log_dir)
     
     # Create model
     model = PointCloudModel(network, 'train', config)
@@ -266,13 +282,18 @@ def train():
     print(f"Using dataset: {config.h5_file_path}")
     # Create dataset and dataloaders
     train_dataset = PUDataset(config)
-    train_dataset, valid_dataset = train_test_split(train_dataset, test_size=0.1)
+    if config.val_h5_path:
+        valid_dataset = validation_dataset(config.val_h5_path)
+    else:
+        train_dataset, valid_dataset = train_test_split(train_dataset, test_size=0.1)
     
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
     valid_loader = DataLoader(valid_dataset, batch_size=config.batch_size, shuffle=False)
     
     print(f"Training on {len(train_dataset)} samples, validating on {len(valid_dataset)} samples")
-    print(f"Logging to {log_dir}")
+    if writer is not None:
+        print(f"Logging to {log_dir}")
+    best_val_loss = float('inf')
     # load checkpoint if provided
     # Training loop
     for epoch in range(config.max_epochs):
@@ -287,7 +308,8 @@ def train():
             config.training_stage = 2
             print("Switching to training stage 2")
 
-        for i, data in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.max_epochs}")):
+        batches = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.max_epochs}", disable=config.best_only)
+        for i, data in enumerate(batches, start=1):
             input_pc, x20, radius, val, x6 = data
             input_pc = input_pc.to(config.device)
             x20 = x20.to(config.device)
@@ -296,13 +318,17 @@ def train():
             metrics = model.optimize(epoch=epoch)
             
             # Log metrics
-            writer.add_scalar('Loss/Total', metrics['total_loss'], model.step)
-            writer.add_scalar('Loss/Chamfer', metrics['chamfer_loss'], model.step)
-            writer.add_scalar('Loss/Image', metrics['img_loss'], model.step)
-            writer.add_scalar('Training/LR', metrics['lr'], model.step)
-            writer.add_scalar('Training/GradNorm', metrics['grad_norm'], model.step)
-            writer.add_scalar('Loss/Average', metrics['avg_loss'], model.step)
-            writer.add_scalar('Loss/Scale', metrics['loss_scale'], model.step)
+            if writer is not None:
+                writer.add_scalar('Loss/Total', metrics['total_loss'], model.step)
+                writer.add_scalar('Loss/Chamfer', metrics['chamfer_loss'], model.step)
+                writer.add_scalar('Loss/Image', metrics['img_loss'], model.step)
+                writer.add_scalar('Training/LR', metrics['lr'], model.step)
+                writer.add_scalar('Training/GradNorm', metrics['grad_norm'], model.step)
+                writer.add_scalar('Loss/Average', metrics['avg_loss'], model.step)
+                writer.add_scalar('Loss/Scale', metrics['loss_scale'], model.step)
+            elif i % config.print_step == 0:
+                print(f'Epoch {epoch + 1}/{config.max_epochs}, batch {i}/{len(train_loader)}, '
+                      f'train loss {metrics["avg_loss"]:.6f}')
             
             train_losses.append(metrics['total_loss'])
         
@@ -311,32 +337,43 @@ def train():
         val_losses = []
         
         with torch.no_grad():
-            for i, data in enumerate(valid_loader):
-                input_pc, _ , radius, gt_pc, x6= data # val is used for validation because it is always 4x upsampled unlike gt_pc.
-                input_pc = input_pc.to(config.device)
-                gt_pc = gt_pc.to(config.device)
-                
-                model.set_input(input_pc, 0, gt_pc, x6)
+            for data in valid_loader:
+                if config.val_h5_path:
+                    input_pc, gt_pc = data
+                    model.set_input(input_pc.to(config.device), 0, x6=gt_pc, x20=gt_pc)
+                else:
+                    input_pc, _, radius, gt_pc, x6 = data
+                    model.set_input(input_pc.to(config.device), 0, gt_pc, x6)
                 val_loss = model.validate()
                 val_losses.append(val_loss.item())
         
         avg_val_loss = sum(val_losses) / len(val_losses)
         avg_train_loss = sum(train_losses) / len(train_losses)
+        if not np.isfinite([avg_train_loss, avg_val_loss]).all():
+            raise FloatingPointError(f'Nonfinite loss at epoch {epoch + 1}')
+        if (config.val_h5_path or config.best_only) and model.training_stage == 2 and avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            best_path = os.path.join(config.model_dir, 'best.pth')
+            torch.save(model.net.state_dict(), best_path + '.tmp')
+            os.replace(best_path + '.tmp', best_path)
+            print(f'Best checkpoint updated at epoch {epoch + 1}: {best_path}')
         
         # Log epoch metrics
-        writer.add_scalar('Epoch/TrainLoss', avg_train_loss, epoch)
-        writer.add_scalar('Epoch/ValidationLoss', avg_val_loss, epoch)
+        if writer is not None:
+            writer.add_scalar('Epoch/TrainLoss', avg_train_loss, epoch)
+            writer.add_scalar('Epoch/ValidationLoss', avg_val_loss, epoch)
         
         print(f"Epoch {epoch+1}: Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
         # print(f"Epoch {epoch+1}: Train Loss: {avg_train_loss:.4f}")        
         # Save model periodically
-        if epoch % config.save_interval == 0 or epoch == config.max_epochs - 1:
+        if not config.best_only and (epoch % config.save_interval == 0 or epoch == config.max_epochs - 1):
             model_path = os.path.join(config.model_dir, f"{network_name}_epoch_{epoch}_{config.dataset}_{config.decay_iter}_decay_steps_{config.distribution}_{timestamp}_refined.pth")
             torch.save(model.net.state_dict(), model_path)
             print(f"Model saved to {model_path}")
 
     
-    writer.close()
+    if writer is not None:
+        writer.close()
     print("Training completed!")
 
 if __name__ == '__main__':

@@ -65,7 +65,7 @@ def read_off(path):
     return vertices, faces
 
 
-def sample_surface(vertices, faces, rng):
+def sample_surface(vertices, faces, rng, point_count=SURFACE_POINTS):
     # Limit memory when drawing from PU-GAN meshes with millions of faces.
     areas = np.empty(len(faces), dtype=np.float64)
     chunk_size = 262144
@@ -76,9 +76,9 @@ def sample_surface(vertices, faces, rng):
     np.cumsum(areas, out=areas)
     if not np.isfinite(areas[-1]) or areas[-1] <= 0:
         raise ValueError('No finite, positive surface area')
-    indices = areas.searchsorted(rng.random(SURFACE_POINTS) * areas[-1], side='right')
+    indices = areas.searchsorted(rng.random(point_count) * areas[-1], side='right')
     a, b, c = vertices[faces[indices]].transpose(1, 0, 2)
-    u, v = rng.random((2, SURFACE_POINTS, 1), dtype=np.float32)
+    u, v = rng.random((2, point_count, 1), dtype=np.float32)
     root_u = np.sqrt(u)
     return (1 - root_u) * a + root_u * (1 - v) * b + root_u * v * c
 

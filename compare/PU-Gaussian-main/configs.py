@@ -51,6 +51,9 @@ class args:
     # h5 files directory used for training. CHANGE IF NEEDED 
     parser.add_argument('--pugan_path', default="data/PU-GAN/train/pugan_x20.h5", type=str, help='the path of train dataset') # /data/dataset.h5 is pugan our way
     parser.add_argument('--pu1k_path', default="data/PU1K/train/pu1k_x20.h5", type=str, help='the path of train dataset') # /data/dataset.h5 is pugan our way
+    parser.add_argument('--val_h5_path', help='Shape-disjoint validation H5 with poisson_256 and poisson_1024')
+    parser.add_argument('--tensorboard_dir', default='logs', help='Base directory for TensorBoard logs')
+    parser.add_argument('--best_only', action='store_true', help='Keep one best checkpoint and use console logs')
     
     parser.add_argument('--r', type=int, default=4, help='upsampling rate')
 
