@@ -38,14 +38,16 @@ def verify_cuda_sources():
             raise RuntimeError(f'{model} native sources no longer match the PU-Gaussian runtime')
 
 
-def train_model(model, epochs, batch_size, seed, train, val, run_dir, env, smoke):
+def train_model(model, epochs, batch_size, seed, train, val, run_dir, env, smoke, gaussian_stage1):
     destination = run_dir / model
     destination.mkdir()
     if model == 'PU-Gaussian':
         args = ['--pu1k_path', str(train), '--val_h5_path', str(val), '--max_epochs', str(epochs),
-                '--stage_1_max_epochs', str(min(1, epochs - 1)), '--random_seed', str(seed),
+                '--stage_1_max_epochs', str(gaussian_stage1), '--random_seed', str(seed),
                 '--model_dir', str(destination / 'checkpoints')]
         checkpoint = 'best.pth'
+        print(f'PU-Gaussian schedule: {gaussian_stage1} Gaussian-only epochs, '
+              f'{epochs - gaussian_stage1} joint epochs', flush=True)
     else:
         args = ['--h5_file_path', str(train), '--val_h5_path', str(val), '--epochs', str(epochs), '--seed', str(seed),
                 '--out_path', str(destination), '--num_workers', '0' if smoke else '4']
@@ -96,18 +98,22 @@ def run_queue(args):
         subset_patches(train, small_train, batch)
         subset_patches(val, small_val, batch)
         epochs = (2, 1, 1)
+        gaussian_stage1 = 1
     else:
         epochs = args.epochs
         small_train, small_val = train, val
+        gaussian_stage1 = args.pu_gaussian_stage1_epochs
+        if gaussian_stage1 is None:
+            gaussian_stage1 = epochs[0] // 2
 
-    first = MODELS.index(args.start_at)
-    if first == 0:
-        dense_train = (run_dir if args.smoke else RUNTIME) / 'pu1k_train_x20.h5'
-        prepare_gaussian_h5(train, data_root, dense_train, args.seed, limit=batch if args.smoke else None)
-        train_model('PU-Gaussian', epochs[0], batch, args.seed, dense_train, small_val, run_dir, env, args.smoke)
-    for index in range(max(1, first), len(MODELS)):
-        train_model(MODELS[index], epochs[index], batch, args.seed, small_train, small_val,
-                    run_dir, env, args.smoke)
+    models = (args.only,) if args.only else MODELS[MODELS.index(args.start_at):]
+    for model in models:
+        model_train = small_train
+        if model == 'PU-Gaussian':
+            model_train = (run_dir if args.smoke else RUNTIME) / 'pu1k_train_x20.h5'
+            prepare_gaussian_h5(train, data_root, model_train, args.seed, limit=batch if args.smoke else None)
+        train_model(model, epochs[MODELS.index(model)], batch, args.seed, model_train, small_val,
+                    run_dir, env, args.smoke, gaussian_stage1)
     print(f'PU1K {label} queue completed: {run_dir}', flush=True)
 
 
@@ -118,12 +124,19 @@ def main():
     parser.add_argument('--batch-size', type=int, default=16, help='Batch size for each model (default: %(default)s)')
     parser.add_argument('--epochs', type=int, nargs=3, default=(200, 60, 100),
                         metavar=('PU_GAUSSIAN', 'GRAD_PU', 'REPKPU'))
-    parser.add_argument('--start-at', choices=MODELS, default=MODELS[0],
+    parser.add_argument('--pu-gaussian-stage1-epochs', type=int,
+                        help='Gaussian-only epochs in full training (default: half the PU-Gaussian epochs)')
+    models = parser.add_mutually_exclusive_group()
+    models.add_argument('--start-at', choices=MODELS, default=MODELS[0],
                         help='Start a new queue at this model and skip earlier models')
+    models.add_argument('--only', choices=MODELS, help='Train only this model')
     parser.add_argument('--smoke', action='store_true', help='Run one batch per epoch at the selected batch size')
     args = parser.parse_args()
     if not (0 <= args.seed < 2 ** 32) or min(args.batch_size, *args.epochs) < 1:
         parser.error('Use a valid NumPy seed, a positive batch size and positive epoch counts')
+    if (args.pu_gaussian_stage1_epochs is not None and
+            not 0 <= args.pu_gaussian_stage1_epochs < args.epochs[0]):
+        parser.error('--pu-gaussian-stage1-epochs must leave at least one joint training epoch')
     active = Path(os.environ.get('CONDA_PREFIX', ''))
     if active.name != 'scdata-v3' or Path(sys.prefix).resolve() != active.resolve():
         parser.error('Run conda activate scdata-v3 before launching the queue')
