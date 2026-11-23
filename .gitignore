@@ -13,3 +13,10 @@
 # Python bytecode.
 __pycache__/
 *.py[cod]
+
+# New retraining runs and local verification artifacts.
+/compare/retrain-runs/
+/compare/unified_metrics/
+/tmp/
+/compare/retrain_*.log
+/compare/evaluation-runs/

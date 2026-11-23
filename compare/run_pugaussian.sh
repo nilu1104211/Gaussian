@@ -39,6 +39,10 @@ import torch
 import open3d
 import pointops_cuda
 import chamfer_3D
+import h5py
+import einops
+import plyfile
+import tqdm
 
 base = Path(sys.prefix).resolve()
 packages = Path(sys.argv[1]).resolve()
@@ -84,7 +88,7 @@ if [[ "$mode" == setup ]]; then
     cp -- utils/Chamfer3D/{setup.py,chamfer_cuda.cpp,chamfer3D.cu} "$work/Chamfer3D/"
 
     PYTHONPATH= "$python" -m pip install --target "$work/python" \
-        'numpy==1.26.4' 'open3d-cpu==0.18.0' scikit-learn matplotlib tensorboard
+        'numpy==1.26.4' 'open3d-cpu==0.18.0' scikit-learn matplotlib tensorboard h5py einops plyfile tqdm
     PYTHONPATH="$work/python" "$python" -m pip install \
         --target "$work/python" --no-build-isolation --no-deps "$work/pointops" "$work/Chamfer3D"
     check_packages "$work/python"

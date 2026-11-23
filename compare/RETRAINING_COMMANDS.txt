@@ -1,0 +1,103 @@
+四网络、双数据集重训（2026-11-23）
+
+当前默认只跑 E0、E6、RepKPU、PU-Gaussian；Grad-PU 暂缓。
+PU1K 与 PU-GAN 各跑四组，总计八组，单 GPU 顺序执行。
+
+实现约定
+- 同一数据集内共享形状划分、基础 patch ID、整物体验证输入和测试输入。
+- PU1K 917/102/127；PU-GAN 108/12/27。PU-GAN 108/12 沿用 PU1K 划分中的相应物体。
+- 官方 PU1K 原训练池中 02801938.f76b14ffc2fe6c7485eb407ec5a0fadd.off
+  与测试集 02747177.f76b14ffc2fe6c7485eb407ec5a0fadd.off 的文件内容完全相同。
+  排除原池中的这一份，并从剩余 ShapeNet 训练物体中按固定种子补一个验证物体，验证仍102，训练从918变917。
+  同一训练分区内另有一对内容相同的官方条目，保留原条目并记录审计；它们不跨验证/测试分区。
+- 划分检查比较来源路径和网格内容 SHA256；官方 train/test 中同名 star.off 实际为不同网格，不以文件名误判为泄漏。
+- 新数据在独立 data/repro_20261123_seed42 目录构建，不使用/覆盖旧 prepared 数据。
+- 实际 Open3D Poisson-disk 40960 点 -> FPS 中心 -> 5120 近邻局部区域 -> 嵌套 FPS 256/1024/1536。
+- 5120 点本身为 20x 监督；1536 点为该区域 FPS 的 6x 监督，不再拼接/截取。
+- 默认 --input-policy native：各模型保留原生输入重采样和增强，统一的是物体、基础几何与验证测试。
+  E0/E6 仍采用相同的原生重采样、旋转、批次顺序及配对训练设置。
+  --input-policy fixed 是可选的共同固定256点输入实验，不能和 native 混称。
+- E0/E6 原生级联损失及 E6 的完整 HD-Guard 配置；RepKPU 保留数据集对应默认分支、核点正则及形变参数组。
+- PU-Gaussian 保留公开训练损失和原生两次测试细化；正式 100 Gaussian-only + 100 joint，scheduler 连续，不重置。
+- 默认 batch16、seed42。E0/E6各100轮，RepKPU100轮，PU-Gaussian200轮。
+- 依参考 batch 对按 step 的衰减阈值进行样本数换算：
+  E0/E6 PU1K: 50000*(64/16)=200000；PU-GAN:50000*(32/16)=100000；PU-Gaussian 两数据集均100000。
+  这是本轮 batch 适配，不声称与原论文每个 epoch 的衰减位置完全相等。RepKPU 原 epoch scheduler 不变。
+- 每5轮及最后一轮，用固定整物体完整4x推断的独立归一化 CD 选 best；PU-Gaussian只在联合阶段选 best。
+- 同一脚本计算 CD（双向平方均值之和）、HD（双向最大平方值的max）、原坐标欧氏 P2F。
+  主表显示原始数值乘1000；逐物体等权平均。Open3D不是已经证明与历史CGAL逐位相同的工具。
+- 仅保留两个模型文件：best.pth 为选中权重；last.pth 含末轮模型、optimizer、scheduler和RNG状态，可续训。
+  测试默认使用 best；保存 test/xyz 和 test/metrics，另保留必要日志、配置、哈希、验证指标。
+
+本机上传 Git（PowerShell，逐条运行；不使用 git add .，避免上传旧结果）
+
+cd D:\dkwork\Gaussian
+git add .gitignore compare/retrain_common.py compare/prepare_retraining_data.py compare/retrain_adapters.py compare/retrain_worker.py compare/run_retraining.py compare/evaluate_pugaussian_protocol.py compare/run_pugaussian.sh compare/Grad-PU-main/args/pugan_args.py compare/RepKPU-main/cfgs/upsampling/pugan_args.py compare/tests/test_retraining.py compare/RETRAINING_COMMANDS.txt
+git diff --cached --stat
+git commit -m "Add four-model two-dataset retraining and unified evaluation"
+git push origin main
+
+服务器先更新（Linux）
+
+cd ~/Gaussian
+git pull --ff-only
+conda activate scdata-v3
+
+先看队列配置（不会训练）
+
+python compare/run_retraining.py --plan
+
+短训：先执行这一条，两个数据集、四个模型都检查
+
+nohup python -u compare/run_retraining.py --smoke > compare/retrain_smoke.log 2>&1 &
+tail -n 40 -F compare/retrain_smoke.log
+
+通过标志：SMOKE PASS。Ctrl+C 只退出 tail，不会停止后台队列。
+短训独立生成少量真实 Poisson/FPS 训练样本、验证/测试对象；E0/E6/RepKPU各3轮，PU-Gaussian2+2轮。
+实际 batch 与正式训练相同。检查非零有限梯度、参数更新、验证后继续训练、两个Gaussian阶段、完整8192点推断及P2F。
+正式入口检查短训通过记录与当前源码/配置是否匹配，没有匹配 PASS 就拒绝正式训练。
+短训只验证流程及早期训练健康，不能保证100/200轮的全部数值和收敛；正式训练持续检查异常并保留失败日志。
+
+正式训练：确认 SMOKE PASS 后执行
+
+nohup python -u compare/run_retraining.py > compare/retrain_full.log 2>&1 &
+tail -n 40 -F compare/retrain_full.log
+
+正式首次启动会自动生成完整的新数据，之后复用校验通过的数据版本。
+队列依次为 PU1K:E0/E6/RepKPU/PU-Gaussian，再 PU-GAN:E0/E6/RepKPU/PU-Gaussian。
+完成标志：RETRAINING COMPLETED。
+修改 batch、输入策略、种子、关键源码后，需要用相同参数重新完成短训。
+若数据制备中断留下未完成的数据目录，请保留失败日志并改用新的 --prepared-root，不要覆盖旧版本。
+
+只跑一个数据集（短训与正式要使用相同选择）
+
+python -u compare/run_retraining.py --smoke --datasets pu1k
+python -u compare/run_retraining.py --datasets pu1k
+
+从末轮状态续训（填写日志中实际打印的训练目录；保持原配置与源码）
+
+python -u compare/run_retraining.py --resume-run compare/retrain-runs/train-seed42-实际时间戳
+
+输出目录
+
+compare/retrain-runs/train-seed42-时间戳/
+  run.json
+  pu1k_summary.csv
+  pugan_summary.csv
+  pu1k/{E0,E6,RepKPU,PU-Gaussian}/
+  pugan/{E0,E6,RepKPU,PU-Gaussian}/
+      best.pth
+      last.pth
+      config.json
+      manifest.json
+      status.json
+      train.log
+      training.jsonl
+      validation.csv
+      health.json
+      test/xyz/*.xyz
+      test/metrics/{summary.csv,per_shape.csv,protocol.json}
+
+测试权重为 best.pth，last.pth 用于恢复训练及末轮权重存档，不根据测试分数挑权重。
+如断在测试阶段，--resume-run 会从已有last恢复并重试测试，已有指标会保留在独立重试目录。
+旧脚本和历史结果未删除。Grad-PU适配保留为显式可选项，默认短训和正式队列均不会运行它。

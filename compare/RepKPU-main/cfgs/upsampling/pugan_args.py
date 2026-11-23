@@ -5,7 +5,7 @@ from cfgs.utils import str2bool
 def parse_pugan_args():
     parser = argparse.ArgumentParser(description='Training Arguments')
     # training
-    parser.add_argument('--seed', default=21, type=float, help='seed')
+    parser.add_argument('--seed', default=21, type=int, help='seed')
     parser.add_argument('--optim', default='adam', type=str, help='optimizer, adam or sgd')
     parser.add_argument('--lr', default=1e-3, type=float, help='learning rate')
     parser.add_argument('--weight_decay', default=0, type=float, help='weight decay')
@@ -22,6 +22,8 @@ def parse_pugan_args():
     # dataset
     parser.add_argument('--dataset', default='pugan', type=str, help='pu1k or pugan')
     parser.add_argument('--h5_file_path', default="./data/PU-GAN/train/PUGAN_poisson_256_poisson_1024.h5", type=str, help='the path of train dataset')
+    parser.add_argument('--val_h5_path', help='Shape-disjoint validation H5')
+    parser.add_argument('--best_only', action='store_true', help='Use best-checkpoint logging')
     parser.add_argument('--num_points', default=256, type=int, help='the points number of each input patch')
     parser.add_argument('--skip_rate', default=1, type=int, help='used for dataset')
     parser.add_argument('--use_random_input', default=False, type=str2bool, help='whether use random sampling for input generation')
