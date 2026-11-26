@@ -20,3 +20,4 @@ __pycache__/
 /tmp/
 /compare/retrain_*.log
 /compare/evaluation-runs/
+/compare/test-runs/

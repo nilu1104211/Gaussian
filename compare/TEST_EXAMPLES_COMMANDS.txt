@@ -1,0 +1,112 @@
+四网络点云样例测试（2026-11-26）
+
+入口：compare/test_examples.py
+在已有 scdata-v3 服务器环境运行，只做推断，不训练。
+默认使用本轮正式重训目录中，各数据集的 E0/E6/RepKPU/PU-Gaussian best.pth。
+Grad-PU 不在此入口中。
+
+一、本机通过 Git 上传，服务器拉取
+
+本机 PowerShell，逐条执行，只提交本次四个文件：
+
+cd D:\dkwork\Gaussian
+git add .gitignore compare/test_examples.py compare/TEST_EXAMPLES_COMMANDS.txt compare/tests/test_examples_export.py
+git diff --cached --stat
+git commit -m "Add isolated four-model point cloud example tests"
+git push origin main
+
+服务器 Linux：
+
+cd /home/zk/Gaussian
+git pull --ff-only
+
+不要使用 git add .，避免混入尚未提交的交接文档等无关文件。
+compare/test-runs/ 已加入 .gitignore；测试结果不通过 Git 上传，完成后单独下载压缩包。
+
+二、默认跑两个数据集，每个固定抽5个物体，四网络全部推断
+
+服务器 Linux：
+
+cd /home/zk/Gaussian
+conda activate scdata-v3
+python -u compare/test_examples.py
+
+每次自动新建独立目录，例如：
+compare/test-runs/test-20261126-180000-123456-examples/
+
+完成时打印：
+Download archive: /home/zk/Gaussian/compare/test-runs/test-实际时间-examples.tar.gz
+EXAMPLE TEST COMPLETED: /home/zk/Gaussian/compare/test-runs/test-实际时间-examples
+
+使用 GPU 0；同一数据集四网络共用同一批物体与完全相同的2048点输入。
+随机抽样只由 seed、数据集名和对象清单决定，不读取测试指标或根据效果挑样本。
+使用 NativeAdapter.infer，与正式测试的完整推断路径相同。
+自动沿用 compare/.pugaussian-runtime/python 的附加运行依赖，不执行依赖安装。
+
+三、按需选少量样例
+
+# 先只跑 PU1K，3个物体
+python -u compare/test_examples.py --datasets pu1k --num-examples 3 --tag first
+
+# 先列出可用对象名；不加载网络、不创建结果目录
+python compare/test_examples.py --datasets pu1k --list-shapes
+
+# 指定对象；替换下面的对象名，不要保留占位文字。支持 .xyz 后缀
+python -u compare/test_examples.py --datasets pu1k --shapes 对象名1 对象名2 --tag chosen
+
+# 只比较基线和自有方法
+python -u compare/test_examples.py --datasets pu1k --num-examples 3 --models E0 E6 --tag e0-e6
+
+# 换一批固定随机样例（同时改变逐对象推断种子，均记录在run.json中）
+python -u compare/test_examples.py --seed 43 --tag seed43
+
+# 更换权重来源或新数据目录时显式填写
+python -u compare/test_examples.py --training-run /home/zk/Gaussian/compare/retrain-runs/train-seed42-20261123-161953-503869 --prepared-root /home/zk/Gaussian/data/repro_20261123_seed42
+
+# 只核对配置、权重/输入/GT/网格哈希并打印计划，不推断、不写目录
+python compare/test_examples.py --datasets pu1k --num-examples 3 --plan
+
+--num-examples 表示每个数据集的数量；--shapes 会覆盖随机抽样数量。
+同时选两个数据集并指定 --shapes 时，对象名必须在两者中都存在。
+--no-previews 跳过PNG；--no-archive 跳过自动压缩；XYZ和PLY始终导出。
+--output-root 可以指定其他测试总目录；每次仍自动创建新的时间戳子目录。
+
+四、输出结构
+
+compare/test-runs/
+  test-时间戳-标签/
+    run.json                       # 所选物体、种子、数据/权重哈希、配置、best轮次、完成状态
+    README.txt
+    files.csv                      # 数据集、物体、标签、点数、XYZ/PLY相对路径和XYZ哈希
+    export.log
+    jobs/                          # 每个模型的独立任务、日志、结果与训练源码manifest
+    pu1k/对象名/
+      input_2048.xyz / .ply         # 真实输入，2048点
+      gt_8192.xyz / .ply            # 对应GT，8192点
+      gt_mesh.off                  # 对应连续三角网格
+      E0.xyz / .ply
+      E6.xyz / .ply
+      RepKPU.xyz / .ply
+      PU-Gaussian.xyz / .ply        # 各8192点
+      comparison.png               # 3个视角；每行是输入、GT、各模型
+    pugan/对象名/                  # 同样结构
+  test-时间戳-标签.tar.gz           # 自动打包；不含权重或训练H5
+
+PNG各列使用相同坐标、物理尺度和视角，展示全部点；不做GT对齐或逐云单独缩放。
+“对应”指同一个物体，不表示预测点与GT点逐点一一对应。
+原始XYZ与网格直接复制；导出的PLY和各模型预测保留原坐标。
+每次重跑会创建新目录；失败目录及日志也保留，不覆盖或清理历史结果。
+只有出现 EXAMPLE TEST COMPLETED 才表示完整导出成功，失败时查看run.json和jobs/*.log。
+
+五、拉回本机
+
+把脚本打印的压缩包文件名代入下面命令；在本机 PowerShell 执行：
+下面的“服务器地址”替换成你实际使用的 SSH 地址；如果用了非默认端口，scp 加 -P 端口。
+
+cd D:\dkwork\Gaussian
+New-Item -ItemType Directory -Force -Path .\compare\test-runs
+scp zk@服务器地址:/home/zk/Gaussian/compare/test-runs/test-实际时间-examples.tar.gz .\compare\test-runs\
+tar -xzf .\compare\test-runs\test-实际时间-examples.tar.gz -C .\compare\test-runs
+
+打开每个物体的comparison.png快速对照；在CloudCompare或MeshLab中加载同一物体目录的PLY/XYZ，
+可以旋转、放大并比较输入、GT与四网络。数据和目录关系均在压缩包中，无需本机重新推断。
