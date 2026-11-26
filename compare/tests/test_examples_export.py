@@ -302,3 +302,94 @@ def test_pretrained_comparison_exports_both_sources_and_original_coordinate_metr
         assert sha256(case / 'PU-Gaussian.xyz') != sha256(case / 'PU-Gaussian-pretrained.xyz')
     with tarfile.open(run.with_suffix('.tar.gz')) as archive:
         assert all(not name.endswith('.pth') for name in archive.getnames())
+
+
+def test_full_entrypoint_requires_full_sets_and_has_no_sampling_flags():
+    import test_pugaussian_pretrained_full as full
+    args = full.parse_args([])
+    assert args.datasets == ['pu1k', 'pugan']
+    assert examples.FULL_TEST_COUNTS == {'pu1k': 127, 'pugan': 27}
+    assert args.models == [examples.PRETRAINED_MODEL]
+    assert args.all_shapes and args.metrics and args.no_previews
+    assert args.num_examples is None and args.shapes is None
+    for flags in (['--num-examples', '5'], ['--shapes', 'shape.a'], ['--models', 'E0']):
+        with pytest.raises(SystemExit):
+            full.parse_args(flags)
+
+
+def test_full_mode_never_samples_and_checks_each_model_protocol(options, monkeypatch):
+    monkeypatch.setattr(examples, 'FULL_TEST_COUNTS', {'pu1k': 3, 'pugan': 27})
+    options.all_shapes = True
+    options.num_examples = 1
+    for model in options.models:
+        path = options.training_run / 'pu1k' / model / 'test/metrics/protocol.json'
+        protocol = read_json(path)
+        protocol.update(status='completed', expected_shapes=3, dataset='PU1K')
+        write_json(path, protocol)
+    plan = examples.build_plan(options)
+    assert plan['test_scope'] == 'full-test-set'
+    assert [row['shape'] for row in plan['selections']['pu1k']] == ['shape.a', 'shape.b', 'shape.c']
+    assert len(plan['jobs']) == 2
+    options.shapes = ['shape.a']
+    with pytest.raises(ValueError, match='cannot be combined'):
+        examples.build_plan(options)
+    options.shapes = None
+    (options.prepared_root / 'PU1K/test/input_2048/shape.a.xyz').unlink()
+    with pytest.raises(ValueError, match='exactly 3 objects, got 2'):
+        examples.execute(options)
+    assert not options.output_root.exists()
+
+
+def test_full_mode_rejects_partial_protocol_and_unmatched_labels(options, monkeypatch):
+    monkeypatch.setattr(examples, 'FULL_TEST_COUNTS', {'pu1k': 3, 'pugan': 27})
+    options.models = ['E0']
+    options.all_shapes = True
+    path = options.training_run / 'pu1k/E0/test/metrics/protocol.json'
+    protocol = read_json(path)
+    protocol.update(status='completed', expected_shapes=3, dataset='PU1K')
+    missing = protocol['source_hashes']['gt'].pop('shape.c.xyz')
+    write_json(path, protocol)
+    with pytest.raises(ValueError, match='full gt names differ'):
+        examples.execute(options)
+    assert not options.output_root.exists()
+    protocol['source_hashes']['gt']['shape.c.xyz'] = missing
+    write_json(path, protocol)
+    (options.prepared_root / 'PU1K/test/gt_8192/extra.xyz').write_text('0 0 0\n')
+    with pytest.raises(ValueError, match='name sets differ'):
+        examples.execute(options)
+    assert not options.output_root.exists()
+
+
+def test_full_pretrained_plan_covers_exactly_127_plus_27_objects(tmp_path):
+    import test_pugaussian_pretrained_full as full
+    training, prepared, weights = tmp_path / 'training', tmp_path / 'prepared', tmp_path / 'weights'
+    write_json(training / 'run.json', dict(status='completed', smoke=False, prepared=str(prepared)))
+    weights.mkdir()
+    for dataset, count in {'pu1k': 127, 'pugan': 27}.items():
+        source = prepared / examples.DATASETS[dataset] / 'test'
+        hashes = dict(inputs={}, gt={}, meshes={})
+        for group, folder, suffix in [('inputs', 'input_2048', '.xyz'), ('gt', 'gt_8192', '.xyz'),
+                                      ('meshes', 'meshes', '.off')]:
+            (source / folder).mkdir(parents=True)
+            for index in range(count):
+                path = source / folder / f'object_{index:03d}{suffix}'
+                # Planning checks inventory and hashes, without loading models/point data.
+                path.write_text(f'{dataset}/{group}/{index}\n')
+                hashes[group][path.name] = sha256(path)
+        reference = training / dataset / 'PU-Gaussian'
+        write_json(reference / 'config.json', dict(model='PU-Gaussian', dataset=dataset, seed=42))
+        write_json(reference / 'status.json', dict(status='completed', best_epoch=105))
+        write_json(reference / 'test/metrics/protocol.json', dict(status='completed', expected_shapes=count,
+                   dataset=examples.DATASETS[dataset], source_hashes=hashes))
+        (weights / f'pu_gaussian_{dataset}_Best.pth').write_bytes(b'official-' + dataset.encode())
+    args = full.parse_args(['--training-run', str(training), '--prepared-root', str(prepared),
+                            '--pretrained-root', str(weights)])
+    plan = examples.build_plan(args)
+    assert len(plan['selections']['pu1k']) == 127
+    assert len(plan['selections']['pugan']) == 27
+    assert sum(map(len, plan['selections'].values())) == 154
+    assert len(plan['jobs']) == 2 and plan['metrics'] and not plan['previews']
+    assert plan['test_scope'] == 'full-test-set'
+    assert all(job['checkpoint_source'] == 'official-pretrained' and job['best_epoch'] is None
+               for job in plan['jobs'])
+    assert plan['entrypoint'].endswith('test_pugaussian_pretrained_full.py')

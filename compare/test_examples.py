@@ -19,6 +19,7 @@ from pathlib import Path
 from retrain_common import DEFAULT_MODELS, ROOT, read_json, sha256, stable_seed, write_json
 
 DATASETS = {'pu1k': 'PU1K', 'pugan': 'PU-GAN'}
+FULL_TEST_COUNTS = {'pu1k': 127, 'pugan': 27}
 DEFAULT_RUN = ROOT / 'compare/retrain-runs/train-seed42-20261123-161953-503869'
 PRETRAINED_MODEL = 'PU-Gaussian-pretrained'
 EXAMPLE_MODELS = (*DEFAULT_MODELS, PRETRAINED_MODEL)
@@ -66,10 +67,23 @@ def build_plan(args):
     if archive.get('status') != 'completed' or archive.get('smoke') is not False:
         raise ValueError('Choose a completed formal training run, not a smoke run')
     prepared = prepared_root(args).resolve()
+    full_test = getattr(args, 'all_shapes', False)
+    if full_test and args.shapes:
+        raise ValueError('--all-shapes cannot be combined with --shapes')
     selections, jobs = {}, []
     for dataset in args.datasets:
         source = prepared / DATASETS[dataset] / 'test'
-        names = select_shapes(available_shapes(source), args.shapes, args.num_examples, args.seed, dataset)
+        available = available_shapes(source)
+        if full_test:
+            expected_count = FULL_TEST_COUNTS[dataset]
+            if len(available) != expected_count:
+                raise ValueError(f'{dataset}: full test requires exactly {expected_count} objects, got {len(available)}')
+            names = available
+            for subfolder, suffix in [('gt_8192', '.xyz'), ('meshes', '.off')]:
+                if {path.stem for path in (source / subfolder).glob('*' + suffix)} != set(names):
+                    raise ValueError(f'{dataset}: full test input/GT/mesh name sets differ')
+        else:
+            names = select_shapes(available, args.shapes, args.num_examples, args.seed, dataset)
         selections[dataset] = []
         for name in names:
             paths = dict(input=source / 'input_2048' / f'{name}.xyz',
@@ -91,6 +105,13 @@ def build_plan(args):
             if not pretrained and digest != status['best_sha256']:
                 raise ValueError(f'Best checkpoint hash changed: {checkpoint}')
             protocol = read_json(folder / 'test/metrics/protocol.json')
+            if full_test:
+                if (protocol.get('status') != 'completed' or protocol.get('expected_shapes') != expected_count
+                        or protocol.get('dataset') != DATASETS[dataset]):
+                    raise ValueError(f'{dataset}: reference protocol is not the completed {expected_count}-object formal test')
+                for group, suffix in [('inputs', '.xyz'), ('gt', '.xyz'), ('meshes', '.off')]:
+                    if set(protocol['source_hashes'][group]) != {name + suffix for name in names}:
+                        raise ValueError(f'{dataset}: full {group} names differ from the formal test protocol')
             for sample in selections[dataset]:
                 for key, group, suffix in [('input', 'inputs', '.xyz'), ('gt', 'gt', '.xyz'),
                                            ('mesh', 'meshes', '.off')]:
@@ -107,7 +128,11 @@ def build_plan(args):
     return dict(status='planned', training_run=str(training), prepared_root=str(prepared),
         seed=args.seed, models=args.models, selections=selections, jobs=jobs,
         previews=not args.no_previews, archive=not args.no_archive, metrics=args.metrics,
-        purpose='Diagnostic matched examples; official pretrained results are separate from formal retraining tables',
+        test_scope='full-test-set' if full_test else 'selected-examples',
+        purpose=('Full fixed test sets; official pretrained results are separate from formal retraining tables'
+                 if full_test else 'Diagnostic matched examples; official pretrained results are separate from formal retraining tables'),
+        entrypoint=str(Path(getattr(args, 'entrypoint', __file__)).resolve()),
+        entrypoint_sha256=sha256(getattr(args, 'entrypoint', __file__)),
         inference='NativeAdapter.infer; same full 2048 -> 8192 path as formal test',
         coordinates='Original saved coordinates; no GT alignment or per-cloud rescaling',
         script_sha256=sha256(__file__), adapter_sha256=sha256(Path(__file__).with_name('retrain_adapters.py')))
@@ -303,11 +328,16 @@ def export_run(run_dir):
         writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
+    scope_description = ('Full fixed test sets: all 127 PU1K / 27 PU-GAN objects for each selected dataset.\n'
+                         'Official pretrained results remain separate from formal retraining rankings.\n'
+                         if plan.get('test_scope') == 'full-test-set' else
+                         'Example metrics are not full-dataset or formal retraining rankings.\n')
     (run_dir / 'README.txt').write_text(
-        'Matched 4x point-cloud examples\n\n'
+        'Matched 4x point-cloud test\n\n'
         'Each dataset/shape folder contains the original input_2048.xyz, gt_8192.xyz,\n'
         'gt_mesh.off, and one 8192-point prediction per model, plus matching PLY files.\n'
-        'Open PLY/XYZ in CloudCompare or MeshLab. comparison.png has three views;\n'
+        'Open PLY/XYZ in CloudCompare or MeshLab. If previews are enabled,\n'
+        'comparison.png has three views;\n'
         'each row uses identical coordinates, physical scale and camera for all clouds.\n'
         'No GT alignment, independent cloud normalization or display subsampling is applied.\n'
         'Pairing means the same object, not point-by-point correspondence with GT.\n\n'
@@ -319,7 +349,7 @@ def export_run(run_dir):
         'our retrained weights, not the official pretrained checkpoint.\n'
         'With --metrics, metrics/ contains diagnostic per-shape/mean CD, squared\n'
         'HD and saved-coordinate P2F (display values x1000), using the same evaluator.\n'
-        'Example metrics are not full-dataset or formal retraining rankings.\n'
+        + scope_description +
         'No checkpoints or training data H5 are included in this export.\n', encoding='utf-8')
     if metric_rows:
         export_metrics(run_dir, plan, metric_rows)
@@ -342,6 +372,7 @@ def export_metrics(run_dir, plan, rows):
     write_csv(destination / 'per_shape.csv', rows)
     write_csv(destination / 'summary.csv', summary)
     write_json(destination / 'protocol.json', dict(status='completed', purpose=plan['purpose'],
+        test_scope=plan.get('test_scope', 'selected-examples'),
         n_shapes={dataset: len(samples) for dataset, samples in plan['selections'].items()},
         normalization='prediction and GT independently centered / max-radius normalized in float32 for CD/HD',
         CD='sum of bidirectional mean squared NN distances', HD='max of bidirectional maximum squared NN distances',
@@ -382,7 +413,8 @@ def execute(args):
             checkpoint_info = ('official pretrained, original epoch unknown'
                                if job['checkpoint_source'] == 'official-pretrained'
                                else f'best epoch {job["best_epoch"]}')
-            print(f'Starting {job["dataset"]}/{job["model"]}, {checkpoint_info}', flush=True)
+            print(f'Starting {job["dataset"]}/{job["model"]}, {checkpoint_info}, '
+                  f'{len(job["shapes"])} test objects', flush=True)
             run_child(['--worker-job', str(job_path)], job_path.with_suffix('.log'), env)
         run_child(['--export-run', str(run_dir)], run_dir / 'export.log', env)
         plan['status'] = 'completed'
@@ -395,7 +427,8 @@ def execute(args):
         plan.update(status='failed', error=str(error) or type(error).__name__)
         write_json(run_dir / 'run.json', plan)
         raise
-    print(f'EXAMPLE TEST COMPLETED: {run_dir}', flush=True)
+    completed = 'FULL TEST COMPLETED' if plan['test_scope'] == 'full-test-set' else 'EXAMPLE TEST COMPLETED'
+    print(f'{completed}: {run_dir}', flush=True)
 
 
 def parser():
@@ -409,6 +442,7 @@ def parser():
                         help='Folder containing official pu_gaussian_{pu1k,pugan}_Best.pth')
     result.add_argument('--num-examples', type=int, default=5, help='Fixed random sample size per dataset')
     result.add_argument('--shapes', nargs='+', help='Exact test shape stems (or .xyz names); overrides sample size')
+    result.add_argument('--all-shapes', action='store_true', help='Use all 127 PU1K / 27 PU-GAN test objects; no sampling')
     result.add_argument('--seed', type=int, default=42, help='Example selection and per-shape inference seed')
     result.add_argument('--output-root', type=Path, default=ROOT / 'compare/test-runs')
     result.add_argument('--tag', default='examples', help='Run label: ASCII letters, digits, hyphen, underscore')

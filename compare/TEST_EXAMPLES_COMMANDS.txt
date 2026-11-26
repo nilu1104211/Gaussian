@@ -1,5 +1,10 @@
 点云样例测试与PU-Gaussian官方权重对照（2026-11-26）
 
+当前需要的是完整测试集时，使用 compare/test_pugaussian_pretrained_full.py，
+完整运行命令见 compare/TEST_PUGAUSSIAN_FULL_COMMANDS.txt。
+该入口默认对PU1K全部127个物体和PU-GAN全部27个物体进行官方权重推断与统一评测。
+下面的test_examples.py默认行为仍然是少量样例，不能把默认5个物体的汇总当作全量结果。
+
 入口：compare/test_examples.py
 在已有 scdata-v3 服务器环境运行，只做推断，不训练。
 默认使用本轮正式重训目录中，各数据集的 E0/E6/RepKPU/PU-Gaussian best.pth。

@@ -1,0 +1,117 @@
+PU-Gaussian官方预训练权重：双数据集完整测试（2026-11-26）
+
+本次目标
+- PU1K：全部127个测试物体，使用pu_gaussian_pu1k_Best.pth。
+- PU-GAN：全部27个测试物体，使用pu_gaussian_pugan_Best.pth。
+- 共154份预测，每份8192点，输入为2048点。
+- 使用之前四网络正式重训测试的同一批固定输入、GT和网格，沿用相同完整推断路径、seed42和统一指标函数。
+- 仅重新推断PU-Gaussian官方预训练版；已完成的四网络训练与结果继续保留。
+
+一、本机通过Git上传本次代码
+
+在本机PowerShell逐条执行：
+
+cd D:\dkwork\Gaussian
+git add .gitignore compare/test_pugaussian_pretrained_full.py compare/test_examples.py compare/tests/test_examples_export.py compare/TEST_PUGAUSSIAN_FULL_COMMANDS.txt compare/TEST_EXAMPLES_COMMANDS.txt
+git diff --cached --stat
+git commit -m "Add full two-dataset PU-Gaussian pretrained evaluation"
+git push origin main
+
+二、服务器拉取并运行完整测试
+
+cd /home/zk/Gaussian
+git pull --ff-only
+conda activate scdata-v3
+python -u compare/test_pugaussian_pretrained_full.py
+
+这条命令默认就是两个完整测试集，不需要--num-examples或--metrics。
+该专用入口没有样例数量、物体筛选或网络选择参数，避免误跑成5个样例。
+启动时会分别显示127 test objects和27 test objects。
+运行结束标志：FULL TEST COMPLETED。
+
+若希望后台运行并保留启动日志，可改用下面两条（不要和前台命令同时启动）：
+
+nohup python -u compare/test_pugaussian_pretrained_full.py > compare/pugaussian_pretrained_full.log 2>&1 &
+tail -n 40 -F compare/pugaussian_pretrained_full.log
+
+每个网络任务在本次独立目录中另有日志；失败会保留run.json与已有产物，不覆盖正式训练结果。
+
+三、严格的完整性检查
+
+默认输入数据根目录取自正式训练归档：
+/home/zk/Gaussian/data/repro_20261123_seed42/
+
+默认参照正式运行：
+/home/zk/Gaussian/compare/retrain-runs/train-seed42-20261123-161953-503869/
+
+开始推断前逐项检查：
+1. 正式参照运行已完成，且不是smoke。
+2. PU1K恰好127个、PU-GAN恰好27个输入。
+3. 输入、GT、网格的文件名集合完全对应。
+4. 物体集合和每份输入/GT/网格哈希与正式测试protocol.json一致。
+5. 每个数据集使用自己的官方预训练权重，记录SHA256。
+
+因此，只有几个样例的目录会被拒绝，不会悄悄得到部分数据的“全量汇总”。
+本入口复用正式运行中的PU-Gaussian配置与数据协议，不需要重新训练，也不需要训练H5参与前向推断。
+
+只想先检查文件与计划、不推断、不创建结果目录：
+
+python compare/test_pugaussian_pretrained_full.py --plan
+
+如确需只测一个完整数据集，可显式指定；仍会要求该数据集的全部物体：
+
+python -u compare/test_pugaussian_pretrained_full.py --datasets pu1k
+python -u compare/test_pugaussian_pretrained_full.py --datasets pugan
+
+更换数据或权重目录时可使用：
+--training-run /完整正式运行目录
+--prepared-root /新数据根目录
+--pretrained-root /官方权重文件夹
+
+四、输出与指标
+
+每次自动新建目录，例如：
+
+compare/test-runs/test-时间戳-pugaussian-pretrained-full/
+  run.json                           # test_scope=full-test-set；全部对象、哈希、权重来源、配置
+  files.csv                          # XYZ/PLY相对路径与点数
+  README.txt
+  jobs/                              # 两个数据集分别保存任务、日志、结果与推断参数
+  metrics/
+    summary.csv                      # 两行：PU1K的127物体均值、PU-GAN的27物体均值
+    per_shape.csv                    # 154行逐物体指标
+    protocol.json                    # 计算口径、数量、权重来源与哈希
+  pu1k/物体名/
+    input_2048.xyz / .ply
+    gt_8192.xyz / .ply
+    gt_mesh.off
+    PU-Gaussian-pretrained.xyz / .ply
+  pugan/物体名/                     # 同样结构
+
+自动生成同名.tar.gz压缩包，完成后打印Download archive路径。
+默认导出完整XYZ/PLY，但不为154个物体逐一绘制PNG，避免大量无必要的预览渲染。
+回传后可从完整结果中选取物体制作对照图，指标仍然来自完整测试集。
+
+指标与之前四网络主表一致：
+- CD：预测/GT各自质心和最大半径归一化后，双向最近邻平方距离均值相加。
+- HD：同一归一化下，两个方向最大平方距离取max。
+- P2F：保存坐标下到GT连续三角网格的无符号欧氏距离均值。
+- 同时输出两个方向HD和逐物体P2F_P99。
+- 显示值均为原始结果乘1000；summary按物体等权平均。
+
+可以将全量summary.csv与之前pu1k_summary.csv、pugan_summary.csv并排诊断。
+但请将这一行明确标记为“官方预训练权重”，与当前独立划分下从头重训的PU-Gaussian区分。
+官方权重的原始最佳轮次未知，记录为null，不沿用本项目重训的105轮。
+这是同一适配推断路径的官方权重对照，不宣称已完成未经适配的官方工具链复现。
+
+五、拉回完整结果
+
+使用本次打印的实际压缩包文件名，在本机PowerShell执行：
+
+cd D:\dkwork\Gaussian
+New-Item -ItemType Directory -Force -Path .\compare\test-runs
+scp zk@服务器地址:/home/zk/Gaussian/compare/test-runs/test-实际时间-pugaussian-pretrained-full.tar.gz .\compare\test-runs\
+tar -xzf .\compare\test-runs\test-实际时间-pugaussian-pretrained-full.tar.gz -C .\compare\test-runs
+
+服务器地址使用你现有的SSH地址或别名；非默认端口为scp添加-P端口。
+完整包同时包含27个PU-GAN新固定输入与GT，回传后也能用于补齐该数据集的本地全量指标复核。
