@@ -32,6 +32,15 @@ def test_structure_jobs_keep_e6_protocol_and_do_not_test_candidates():
     assert 'evaluate_test' not in job_config(arguments(), 'pu1k', 'E6', Path('run'), Path('prepared'))
 
 
+def test_structure_epoch_budget_does_not_change_smoke_or_native_baselines():
+    short = arguments(epochs=20)
+    config = job_config(short, 'pu1k', 'V1a', Path('run'), Path('prepared'))
+    assert config['epochs'] == 20 and config['decay_iter'] == 200000 and config['val_every'] == 5
+    assert job_config(arguments(epochs=20, smoke=True), 'pu1k', 'V1a', Path('run'), Path('prepared'))['epochs'] == 3
+    assert job_config(short, 'pu1k', 'E6', Path('run'), Path('prepared'))['epochs'] == 100
+    assert profile(short) == profile(arguments(epochs=100))
+
+
 def test_overrides_are_recorded_and_change_smoke_fingerprint_profile(tmp_path):
     path = tmp_path / 'overrides.json'
     write_json(path, {'V3': {'geometry_gate': True, 'learned_normal': True, 'use_neighborhood_refine': True}})

@@ -56,6 +56,8 @@ def job_config(args, dataset, model, output, prepared):
     reference_batch = 64 if model in PUGCS_MODELS and dataset == 'pu1k' else 32
     decay_iter = max(1, round(50000 * reference_batch / args.batch_size))
     epochs = 100 if model in PUGCS_MODELS else {'Grad-PU': 60, 'RepKPU': 100, 'PU-Gaussian': 200}[model]
+    if model in NEW_PUGCS_MODELS and getattr(args, 'epochs', None) is not None:
+        epochs = args.epochs
     stage1 = 100 if model == 'PU-Gaussian' else 0
     if args.smoke:
         epochs = 4 if model == 'PU-Gaussian' else args.smoke_epochs
@@ -235,6 +237,7 @@ def main():
     parser.add_argument('--models', choices=MODELS, nargs='+', default=list(DEFAULT_MODELS))
     parser.add_argument('--batch-size', type=int, default=16)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--epochs', type=int, help='Epoch budget for new PU-GCSNet structure variants only')
     parser.add_argument('--input-policy', choices=('fixed', 'native'), default='native',
                         help='Native resampling/augmentation on shared patch IDs; fixed is an optional controlled variant')
     parser.add_argument('--grad-lr', type=float, default=1e-3)
@@ -251,6 +254,8 @@ def main():
     group.add_argument('--resume-run', type=Path)
     parser.add_argument('--plan', action='store_true', help='Print configurations without accessing CUDA/data')
     args = parser.parse_args()
+    if args.epochs is not None and (args.epochs < 1 or any(model not in NEW_PUGCS_MODELS for model in args.models)):
+        parser.error('--epochs requires a positive budget and only new structure variants')
     if args.batch_size < 1 or args.smoke_epochs < 2 or not 0 <= args.seed < 2**32 or not 0 <= args.grad_seed < 2**32 or args.grad_lr <= 0:
         parser.error('Use positive batch/lr, >=2 smoke epochs and a valid seed')
     if len(set(args.datasets)) != len(args.datasets) or len(set(args.models)) != len(args.models):
