@@ -148,12 +148,34 @@ class Model(object):
                     for j, name in enumerate(('a', 'b', 'c')):
                         metrics[name + '_abs'] = self.aux['abc'][..., j].abs().mean()
                     metrics['valid_frame_fraction'] = self.aux['frame_valid'].mean()
+                for key in ('fit_residual', 'geometry_confidence', 'refine_geo_move_over_d'):
+                    if key in self.aux:
+                        metrics[key + '_mean'] = self.aux[key].mean()
+                if 'learned_child_delta' in self.aux:
+                    metrics['learned_tangent_abs'] = self.aux['learned_child_delta'][..., :2].abs().mean()
+                    metrics['learned_normal_abs'] = self.aux['learned_child_delta'][..., 2].abs().mean()
             self.last_metrics = {name: value.item() for name, value in metrics.items()}
 
         if not torch.isfinite(loss):
             raise FloatingPointError('Non-finite loss before optimizer step')
 
         loss.backward()
+        # Zero-initialized output projections intentionally block upstream new
+        # layers on step 1; their gradients should open after the first update.
+        if hasattr(self.net.upsampling_stage_2, 'learned_tangent'):
+            groups = dict(feature_bridge='upsampling_stage_2.feature_bridge',
+                          surface_offset='upsampling_stage_2.offset_head',
+                          child_encoder='upsampling_stage_2.child_encoder',
+                          cross_fusion='cross_stage_refiner.fusion',
+                          cross_head='cross_stage_refiner.residual_head')
+            for label, prefix in groups.items():
+                gradients = [p.grad.detach().norm() for name, p in self.net.named_parameters()
+                             if name.startswith(prefix + '.') and p.grad is not None]
+                if gradients:
+                    norm = torch.stack(gradients).norm()
+                    if not torch.isfinite(norm):
+                        raise FloatingPointError('Nonfinite gradient in ' + label)
+                    self.last_metrics['grad_' + label] = norm.item()
         self.optimizer.step()
         if steps % self.decay_step == 0 and steps!=0:
             self.lr_scheduler.step()

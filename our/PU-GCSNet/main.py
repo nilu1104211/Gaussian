@@ -18,12 +18,13 @@ from network.PUCRN import PUGCSNet
 from network import operations
 from network.model_loss import CD_dist
 from network.point_ops import furthest_point_sample, gather_operation
+from network.variants import NEW_FLAGS, NEW_BOUNDS, add_structure_arguments
 from utils import pc_utils
 
 
 NETWORK_KEYS = ('stage2', 'sampling', 'k', 'sigma_min', 'sigma_max',
                 'center_bound', 'normal_bound', 'height_bound', 'rho',
-                'refinement', 'refine_radius')
+                'refinement', 'refine_radius', *NEW_FLAGS, *NEW_BOUNDS)
 
 
 def parse_args():
@@ -82,6 +83,7 @@ def parse_args():
     parser.add_argument('--tail_fraction', type=float, default=0.02)
     parser.add_argument('--tail_warmup_epochs', type=int, default=10)
     parser.add_argument('--save_stages', action='store_true', help='Save merged P1/P2 and P3 predictions')
+    add_structure_arguments(parser)
     args = parser.parse_args()
     if min(args.batch_size, args.save_step, args.print_step, args.decay_iter, args.max_epoch) <= 0:
         parser.error('Batch size, epochs and step intervals must be positive')

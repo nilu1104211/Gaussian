@@ -16,7 +16,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from retrain_common import DEFAULT_MODELS, ROOT, read_json, sha256, stable_seed, write_json
+from retrain_common import DEFAULT_MODELS, NEW_PUGCS_MODELS, ROOT, read_json, sha256, stable_seed, write_json
 
 DATASETS = {'pu1k': 'PU1K', 'pugan': 'PU-GAN'}
 FULL_TEST_COUNTS = {'pu1k': 127, 'pugan': 27}
@@ -26,7 +26,7 @@ REPKPU_PRETRAINED_MODEL = 'RepKPU-pretrained'
 PUCRN_PRETRAINED_MODEL = 'PU-CRN-pretrained'
 PRETRAINED_MODELS = {PRETRAINED_MODEL: 'PU-Gaussian', REPKPU_PRETRAINED_MODEL: 'RepKPU',
                      PUCRN_PRETRAINED_MODEL: 'E0'}
-EXAMPLE_MODELS = (*DEFAULT_MODELS, *PRETRAINED_MODELS)
+EXAMPLE_MODELS = (*DEFAULT_MODELS, *NEW_PUGCS_MODELS, *PRETRAINED_MODELS)
 PRETRAINED_ROOT = ROOT / 'compare/PU-Gaussian-main/pretrained_model'
 REPKPU_PRETRAINED_ROOT = ROOT / 'compare/RepKPU-main/pretrain'
 PUCRN_PRETRAINED_ROOT = ROOT / 'baseline/3DVision-main/PointUpsampling/PUCRN/model/release'
@@ -150,7 +150,17 @@ def build_plan(args):
                 digest, origin, variant = sha256(checkpoint), str(folder / 'status.json'), 'retrained'
             if not pretrained and digest != status['best_sha256']:
                 raise ValueError(f'Best checkpoint hash changed: {checkpoint}')
-            protocol = read_json(folder / 'test/metrics/protocol.json')
+            if native_model in NEW_PUGCS_MODELS and status.get('test_evaluated') is False:
+                # Explicit evaluation of a structure selected using validation.
+                # Bind it to the exact prepared manifest used during training.
+                training_manifest = read_json(folder / 'manifest.json')
+                if training_manifest['data_manifest_sha256'] != sha256(prepared / 'manifest.json'):
+                    raise ValueError('Prepared data changed since structure training')
+                protocol = dict(status='completed', dataset=DATASETS[dataset], expected_shapes=len(available),
+                    source_hashes={group: {name + suffix: sha256(source / subfolder / (name + suffix)) for name in available}
+                        for group, subfolder, suffix in [('inputs', 'input_2048', '.xyz'), ('gt', 'gt_8192', '.xyz'), ('meshes', 'meshes', '.off')]})
+            else:
+                protocol = read_json(folder / 'test/metrics/protocol.json')
             if full_test:
                 if (protocol.get('status') != 'completed' or protocol.get('expected_shapes') != expected_count
                         or protocol.get('dataset') != DATASETS[dataset]):

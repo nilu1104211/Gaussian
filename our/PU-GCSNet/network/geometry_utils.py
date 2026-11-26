@@ -18,7 +18,7 @@ def tangent_basis(normal, preferred=None):
 
 
 @torch.no_grad()
-def local_pca_frame(points, k=16, chunk_size=256):
+def local_pca_frame(points, k=16, chunk_size=256, return_neighbors=False):
     """points [B,N,3]. Exclude self by index, including for coincident points.
 
     A canonical frame handles zero neighborhoods. Line neighborhoods use a
@@ -62,5 +62,8 @@ def local_pca_frame(points, k=16, chunk_size=256):
         tangent, bitangent = tangent_basis(normal, tangent)
         scale = (neighbors - points[:, :, None]).square().sum(-1).mean(-1, keepdim=True).clamp_min(1e-12).sqrt()
         ratios = eigenvalues / eigenvalues.sum(-1, keepdim=True).clamp_min(1e-12)
-    return dict(normal=normal, tangent=tangent, bitangent=bitangent,
-                scale=scale, ratios=ratios, valid=valid.float())
+    result = dict(normal=normal, tangent=tangent, bitangent=bitangent,
+                  scale=scale, ratios=ratios, valid=valid.float())
+    if return_neighbors:
+        result['relative_neighbors'] = (neighbors - points[:, :, None]) / scale.unsqueeze(-2)
+    return result

@@ -12,7 +12,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 import torch
-from retrain_common import ROOT, stable_seed
+from retrain_common import ROOT, PUGCS_MODELS, NEW_PUGCS_MODELS, stable_seed
 
 
 class NativeAdapter:
@@ -23,7 +23,7 @@ class NativeAdapter:
         self.query_grad_norm = 0.0
         # Upstream configs.py parses argv at import time.
         sys.argv = [sys.argv[0]]
-        if self.kind in ('E0', 'E6'):
+        if self.kind in PUGCS_MODELS:
             project = ROOT / 'our/PU-GCSNet'
             sys.path.insert(0, str(project))
             from main import parse_args, make_network
@@ -37,6 +37,11 @@ class NativeAdapter:
                 values.update(stage2='quadratic', sampling='deterministic', refinement='local',
                     refine_radius=0.5, lambda_surf=0.1, surf_eta=0., lambda_normal=0.,
                     lambda_tail=0.05, lambda_growth=0.05, tail_fraction=0.02, tail_warmup_epochs=10)
+            if self.kind in NEW_PUGCS_MODELS:
+                if 'network_config' not in config or 'loss_config' not in config:
+                    raise ValueError('Structure variants require explicit network_config and loss_config')
+                values.update(config['network_config'])
+                values.update(config['loss_config'])
             vars(self.args).update(values)
             self.net, _ = make_network(self.args, torch.device('cuda'))
             self.native = Model(self.net, 'train', self.args)
@@ -125,7 +130,7 @@ class NativeAdapter:
 
     def train_batch(self, batch, step, epoch):
         self.net.train()
-        if self.kind in ('E0', 'E6'):
+        if self.kind in PUGCS_MODELS:
             self.native.set_input(batch['input'].cuda().transpose(1, 2), batch['radius'].cuda(),
                                   batch['gt'].cuda().transpose(1, 2))
             self.native.optimize(step, epoch)
@@ -169,7 +174,7 @@ class NativeAdapter:
         old_truncation = getattr(self.args, 'truncate_distance', None)
         self.net.eval()
         try:
-            if self.kind in ('E0', 'E6'):
+            if self.kind in PUGCS_MODELS:
                 center = points.mean(axis=0, keepdims=True)
                 radius = max(float(np.linalg.norm(points - center, axis=1).max()), 1e-12)
                 tensor = torch.as_tensor((points - center) / radius, device='cuda').transpose(0, 1)[None]
@@ -225,7 +230,7 @@ class PatchDataset(torch.utils.data.Dataset):
         if self.file is None:
             self.file = h5py.File(self.path, 'r')
         adapter, aug = self.adapter, self.adapter.aug
-        native_random = (adapter.kind in ('E0', 'E6') or getattr(adapter.args, 'use_random_input', False))
+        native_random = (adapter.kind in PUGCS_MODELS or getattr(adapter.args, 'use_random_input', False))
         random_input = self.input_policy == 'native' and native_random
         points = self.file['poisson_1024' if random_input else 'poisson_256'][index]
         gt = self.file['poisson_1024'][index]
@@ -237,7 +242,7 @@ class PatchDataset(torch.utils.data.Dataset):
         try:
             if random_input:
                 points = points[aug.nonuniform_sampling(len(points), 256)]
-            if adapter.kind in ('E0', 'E6'):
+            if adapter.kind in PUGCS_MODELS:
                 points, gt = aug.rotate_point_cloud_and_gt(points[None], gt[None])
                 points, gt, scale = points[0], gt[0], 1.
             elif adapter.kind == 'PU-Gaussian':

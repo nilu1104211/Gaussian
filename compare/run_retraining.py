@@ -13,7 +13,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from retrain_common import DEFAULT_MODELS, MODELS, ROOT, read_json, sha256, source_hashes, write_json
+from retrain_common import DEFAULT_MODELS, MODELS, PUGCS_MODELS, NEW_PUGCS_MODELS, ROOT, pugcs_variant_options, read_json, sha256, source_hashes, write_json
 
 COMPARE = ROOT / 'compare'
 RUNTIME = COMPARE / '.pugaussian-runtime'
@@ -21,13 +21,30 @@ RUNS = COMPARE / 'retrain-runs'
 CERTIFICATE = RUNS / 'smoke_pass.json'
 
 
+def structure_overrides(args):
+    path = getattr(args, 'structure_config', None)
+    if path is None:
+        return {}
+    values = read_json(path)
+    allowed = set(pugcs_variant_options('E6'))
+    if not isinstance(values, dict) or set(values) - set(NEW_PUGCS_MODELS):
+        raise ValueError('Structure config must map new variant names to network option dictionaries')
+    for name, options in values.items():
+        if not isinstance(options, dict) or set(options) - allowed:
+            raise ValueError('Unknown network option for ' + name)
+    return values
+
+
 def profile(args):
-    return dict(seed=args.seed, batch_size=args.batch_size, input_policy=args.input_policy,
+    value = dict(seed=args.seed, batch_size=args.batch_size, input_policy=args.input_policy,
                 data_root=str(args.data_root.resolve()),
                 grad_lr=args.grad_lr, grad_head_bias=args.grad_head_bias, grad_seed=args.grad_seed,
                 native_losses=True, lr_policy='native optimizer/epoch schedules; step intervals scaled by reference batch',
                 validation='whole objects, independent float32 CD, every 5 epochs plus final',
                 gaussian_schedule='100 Gaussian + 100 joint epochs')
+    if getattr(args, 'structure_config', None) is not None:
+        value['structure_overrides'] = structure_overrides(args)
+    return value
 
 
 def fingerprint(args):
@@ -36,18 +53,27 @@ def fingerprint(args):
 
 
 def job_config(args, dataset, model, output, prepared):
-    reference_batch = 64 if model in ('E0', 'E6') and dataset == 'pu1k' else 32
+    reference_batch = 64 if model in PUGCS_MODELS and dataset == 'pu1k' else 32
     decay_iter = max(1, round(50000 * reference_batch / args.batch_size))
-    epochs = {'E0': 100, 'E6': 100, 'Grad-PU': 60, 'RepKPU': 100, 'PU-Gaussian': 200}[model]
+    epochs = 100 if model in PUGCS_MODELS else {'Grad-PU': 60, 'RepKPU': 100, 'PU-Gaussian': 200}[model]
     stage1 = 100 if model == 'PU-Gaussian' else 0
     if args.smoke:
         epochs = 4 if model == 'PU-Gaussian' else args.smoke_epochs
         stage1 = 2 if model == 'PU-Gaussian' else 0
-    return dict(model=model, dataset=dataset, output=str(output), prepared=str(prepared),
+    config = dict(model=model, dataset=dataset, output=str(output), prepared=str(prepared),
         epochs=epochs, stage1_epochs=stage1, seed=args.seed, batch_size=args.batch_size,
         model_seed=args.grad_seed if model == 'Grad-PU' else args.seed,
         decay_iter=decay_iter, input_policy=args.input_policy, grad_lr=args.grad_lr,
         grad_head_bias=args.grad_head_bias, val_every=1 if args.smoke else 5, smoke=args.smoke)
+    if model in NEW_PUGCS_MODELS:
+        config['network_config'] = pugcs_variant_options(model)
+        config['network_config'].update(structure_overrides(args).get(model, {}))
+        config['loss_config'] = dict(lambda_surf=0.1, surf_eta=0., lambda_normal=0.,
+            lambda_tail=0.05, lambda_growth=0.05, tail_fraction=0.02, tail_warmup_epochs=10)
+        # Structure selection uses validation only. A frozen selected best can
+        # later be tested explicitly using test_examples.py --all-shapes.
+        config['evaluate_test'] = False
+    return config
 
 
 def environment():
@@ -73,11 +99,17 @@ print('Native preflight:', torch.__version__, torch.cuda.get_device_name(0),
 def aggregate(run_dir, jobs):
     for dataset in sorted({j['dataset'] for j in jobs}):
         rows = []
+        validation_rows = []
         for job in jobs:
             if job['dataset'] != dataset:
                 continue
             status = read_json(Path(job['output']) / 'status.json')
             if status['status'] == 'completed':
+                if status.get('test_evaluated') is False:
+                    with (Path(job['output']) / 'validation.csv').open(encoding='utf-8-sig') as stream:
+                        best = next(row for row in csv.DictReader(stream) if int(row['epoch']) == status['best_epoch'])
+                    validation_rows.append(dict(model=job['model'], dataset=dataset, **best))
+                    continue
                 with (Path(status['metrics_dir']) / 'summary.csv').open(encoding='utf-8-sig') as stream:
                     rows.extend(csv.DictReader(stream))
         if rows:
@@ -85,6 +117,11 @@ def aggregate(run_dir, jobs):
                 writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
                 writer.writeheader()
                 writer.writerows(rows)
+        if validation_rows:
+            with (run_dir / f'{dataset}_validation_summary.csv').open('w', newline='', encoding='utf-8-sig') as stream:
+                writer = csv.DictWriter(stream, fieldnames=list(validation_rows[0]))
+                writer.writeheader()
+                writer.writerows(validation_rows)
 
 
 def execute(args):
@@ -206,6 +243,8 @@ def main():
     parser.add_argument('--grad-head-bias', type=float, default=None,
                         help='Explicit optional initialization repair; does not replace ReLU or change loss')
     parser.add_argument('--smoke', action='store_true')
+    parser.add_argument('--structure-config', type=Path,
+                        help='Optional JSON mapping new variant names to network option overrides; recorded in fingerprint/config')
     parser.add_argument('--smoke-epochs', type=int, default=3)
     group = parser.add_mutually_exclusive_group()
     group.add_argument('--run-dir', type=Path)

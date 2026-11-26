@@ -1,13 +1,25 @@
 """Small, dependency-light utilities shared by the new retraining commands."""
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-MODELS = ('E0', 'E6', 'Grad-PU', 'RepKPU', 'PU-Gaussian')
+NEW_PUGCS_MODELS = ('M0', 'V1a', 'V1', 'V2a', 'V2', 'V3', 'Tail-only')
+PUGCS_MODELS = ('E0', 'E6', *NEW_PUGCS_MODELS)
+MODELS = (*PUGCS_MODELS, 'Grad-PU', 'RepKPU', 'PU-Gaussian')
 DEFAULT_MODELS = ('E0', 'E6', 'RepKPU', 'PU-Gaussian')
 DATA_VERSION = 1
+
+
+def pugcs_variant_options(name):
+    # Load the dependency-free presets without importing any project's colliding
+    # `network` package in the launcher or external-model workers.
+    spec = importlib.util.spec_from_file_location('pugcs_variants', ROOT / 'our/PU-GCSNet/network/variants.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.variant_options(name)
 
 
 def sha256(path):

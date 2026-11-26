@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from evaluate_pugaussian_protocol import evaluate, point_scores, read_points, write_csv
-from retrain_common import read_json, sha256, source_hashes, stable_seed, write_json
+from retrain_common import PUGCS_MODELS, read_json, sha256, source_hashes, stable_seed, write_json
 
 
 def seed_all(seed):
@@ -56,12 +56,21 @@ def infer_directory(adapter, source, destination, seed, expected=None):
         raise ValueError(f'No whole-object inputs: {source}')
     if expected is not None and len(names) != expected:
         raise ValueError(f'{source}: expected {expected} whole objects, got {len(names)}')
+    inference_seconds = 0.
     with isolated_rng():
         for name in names:
             seed_all(stable_seed(seed, 'inference', name))
             points = read_points(source / 'input_2048' / f'{name}.xyz', 2048)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            started = time.perf_counter()
             prediction = adapter.infer(points)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            inference_seconds += time.perf_counter() - started
             np.savetxt(destination / f'{name}.xyz', prediction, fmt='%.10g')
+    adapter.last_inference_timing = dict(seconds=inference_seconds, n_shapes=len(names),
+        seconds_per_shape=inference_seconds / len(names), scope='model whole-object inference, excludes XYZ IO and metrics')
     return len(names)
 
 
@@ -97,7 +106,7 @@ def run(config, resume=False):
         dataset = PatchDataset(dataset_folder / 'train.h5', adapter, config['seed'], config['input_policy'])
         generator = torch.Generator()
         loader = DataLoader(dataset, batch_size=config['batch_size'], shuffle=True, generator=generator,
-                            num_workers=0, drop_last=adapter.kind in ('E0', 'E6'))
+                            num_workers=0, drop_last=adapter.kind in PUGCS_MODELS)
         if len(loader) == 0:
             raise ValueError('Training set smaller than batch size')
         best, best_epoch, start, step = float('inf'), None, 1, 0
@@ -120,6 +129,7 @@ def run(config, resume=False):
             restore_rng(saved['rng'])
         write_json(destination / 'manifest.json', dict(config=config, sources=source_hashes(),
             torch=torch.__version__, gpu=torch.cuda.get_device_name(0),
+            parameter_count=sum(p.numel() for p in adapter.net.parameters()),
             data_manifest_sha256=sha256(Path(config['prepared']) / 'manifest.json'),
             native_arguments=vars(adapter.args)))
         with (destination / 'training.jsonl').open('a', encoding='utf-8') as log:
@@ -148,6 +158,9 @@ def run(config, resume=False):
                     summary = validate(adapter, dataset_folder / 'validation', config['seed'], destination / 'validation_xyz', data_info['validation_shapes'])
                     validation_seen = True
                     row = dict(epoch=epoch, **summary)
+                    if not config.get('evaluate_test', True):
+                        row.update(inference_seconds=adapter.last_inference_timing['seconds'],
+                                   seconds_per_shape=adapter.last_inference_timing['seconds_per_shape'])
                     history.append(row)
                     if summary['CD'] < best:
                         best, best_epoch = summary['CD'], epoch
@@ -169,8 +182,27 @@ def run(config, resume=False):
             raise RuntimeError('Smoke test did not verify training updates AFTER validation')
         if adapter.health['gradient_norm'] <= 0 or adapter.health['parameter_step_max'] <= 0:
             raise RuntimeError('Final training step has no effective gradient/parameter update')
+        if not config.get('evaluate_test', True):
+            best_row = next(row for row in history if row['epoch'] == best_epoch)
+            write_json(destination / 'health.json', dict(passed=True, final_training=adapter.health,
+                post_validation_updates=post_validation_updates, test_evaluated=False, test_shapes=0))
+            write_json(destination / 'performance.json', dict(
+                parameter_count=sum(p.numel() for p in adapter.net.parameters()),
+                peak_cuda_allocated_bytes=torch.cuda.max_memory_allocated(),
+                validation_inference_seconds_at_best=best_row['inference_seconds'],
+                seconds_per_validation_shape_at_best=best_row['seconds_per_shape'],
+                timing_scope='model whole-object inference, excludes XYZ IO and metrics',
+                test_evaluated=False))
+            write_json(status_path, dict(status='completed', best_epoch=best_epoch, best_val_cd=best,
+                best_sha256=sha256(destination / 'best.pth'), last_sha256=sha256(last_path),
+                test_evaluated=False, metrics_dir=None))
+            return
         adapter.net.load_state_dict(torch.load(destination / 'best.pth', map_location='cuda', weights_only=True))
+        torch.cuda.synchronize()
+        inference_started = time.monotonic()
         count = infer_directory(adapter, dataset_folder / 'test', destination / 'test/xyz', config['seed'], data_info['test_shapes'])
+        torch.cuda.synchronize()
+        inference_seconds = time.monotonic() - inference_started
         from evaluate_pugaussian_protocol import run as evaluate_run
         metrics_dir = destination / 'test/metrics'
         if metrics_dir.exists() and any(metrics_dir.iterdir()):
@@ -183,6 +215,12 @@ def run(config, resume=False):
         write_json(destination / 'health.json', dict(passed=True, final_training=adapter.health,
             grad_head=getattr(adapter, 'head_health', None), query_gradient_norm=adapter.query_grad_norm,
             post_validation_updates=post_validation_updates, test_shapes=count, metrics_dir=str(metrics_dir)))
+        write_json(destination / 'performance.json', dict(
+            parameter_count=sum(p.numel() for p in adapter.net.parameters()),
+            peak_cuda_allocated_bytes=torch.cuda.max_memory_allocated(),
+            test_inference_and_export_seconds=inference_seconds,
+            seconds_per_test_shape=inference_seconds / count,
+            timing_scope='whole-object inference plus reading/writing XYZ, excludes final metrics'))
         write_json(status_path, dict(status='completed', best_epoch=best_epoch, best_val_cd=best,
             best_sha256=sha256(destination / 'best.pth'), last_sha256=sha256(last_path), metrics_dir=str(metrics_dir)))
     except BaseException as error:

@@ -7,6 +7,8 @@ from torch import einsum
 from .point_ops import grouping_operation
 from .gaussian_surface_stage import GaussianSurfaceStage
 from .hd_guard import bound_refinement_offset
+from .learnable_surface_generator import LearnableSurfaceGenerator
+from .cross_stage_refiner import CrossStageRefiner, gather_parent
 
 
 
@@ -20,7 +22,12 @@ class CRNet(torch.nn.Module):
         up_point: upsampled results, (B, 3, up_ratio * N_input)
     """
     def __init__(self, up_ratio=4, stage2='quadratic', refinement='legacy',
-                 refine_radius=0.5, **geometry_options):
+                 refine_radius=0.5, feature_bridge=False, learned_tangent=False,
+                 learned_normal=False, geometry_gate=False, use_f2_skip=False,
+                 use_geo_skip=False, use_neighborhood_refine=False,
+                 use_tangent_normal_head=False, tangent_bound=0.25,
+                 learned_normal_bound=0.1, refine_tangent_bound=0.1,
+                 refine_normal_bound=0.05, **geometry_options):
         super(CRNet, self).__init__()
         if up_ratio != 4:
             raise ValueError('PU-GCSNet currently supports 4x upsampling')
@@ -32,26 +39,50 @@ class CRNet(torch.nn.Module):
         if not np.isfinite(refine_radius) or refine_radius <= 0:
             raise ValueError('refine_radius must be finite and positive')
         self.refinement, self.refine_radius = refinement, refine_radius
+        self.use_feature_bridge = feature_bridge
+        cross_stage = use_f2_skip or use_geo_skip or use_neighborhood_refine or use_tangent_normal_head
+        new_surface = feature_bridge or learned_tangent or learned_normal or geometry_gate or cross_stage
+        if new_surface and stage2 != 'quadratic':
+            raise ValueError('New geometry modules require quadratic Stage-2')
         step_up_rate = int(np.sqrt(up_ratio))
         self.upsampling_stage_1 = SubNetwork(up_ratio = step_up_rate)
+        surface_class = LearnableSurfaceGenerator if new_surface else GaussianSurfaceStage
+        new_options = dict(feature_bridge=feature_bridge, learned_tangent=learned_tangent,
+                           learned_normal=learned_normal, geometry_gate=geometry_gate,
+                           child_features=cross_stage, tangent_bound=tangent_bound,
+                           learned_normal_bound=learned_normal_bound) if new_surface else {}
         self.upsampling_stage_2 = (SubNetwork(up_ratio=step_up_rate) if stage2 == 'baseline'
-                                   else GaussianSurfaceStage(Transformer_extractor(128, 64),
-                                                             mode=stage2, **geometry_options))
+                                   else surface_class(Transformer_extractor(128, 64),
+                                                      mode=stage2, **new_options, **geometry_options))
         self.refinement_stage = SubNetwork(up_ratio = 1)
+        if cross_stage:
+            self.cross_stage_refiner = CrossStageRefiner(use_f2_skip, use_geo_skip,
+                use_neighborhood_refine, use_tangent_normal_head,
+                refine_tangent_bound, refine_normal_bound)
 
     def forward(self, point_cloud, gt=None, return_aux=False):
         point_cloud = point_cloud.float().contiguous() 
-        p1_pred = self.upsampling_stage_1(point_cloud)
+        if self.use_feature_bridge:
+            stage1 = self.upsampling_stage_1(point_cloud, return_aux=True)
+            p1_pred, f1 = stage1['points'], stage1['up_feat']
+        else:
+            p1_pred, f1 = self.upsampling_stage_1(point_cloud), None
         aux = {}
-        if (return_aux or self.refinement == 'local') and self.stage2 != 'baseline':
-            p2_pred, aux = self.upsampling_stage_2.forward_with_aux(p1_pred)
+        if (return_aux or self.refinement == 'local' or hasattr(self, 'cross_stage_refiner') or self.use_feature_bridge) and self.stage2 != 'baseline':
+            p2_pred, aux = self.upsampling_stage_2.forward_with_aux(p1_pred, parent_features=f1)
         else:
             p2_pred = self.upsampling_stage_2(p1_pred)
-        p3_pred = self.refinement_stage(p2_pred) 
+        if hasattr(self, 'cross_stage_refiner'):
+            # up_ratio=1 preserves P2 ordering; fuse before the original regressor.
+            stage3 = self.refinement_stage(p2_pred, return_aux=True)
+            f3 = self.cross_stage_refiner.fuse(stage3['up_feat'], p2_pred, aux)
+            p3_pred = p2_pred + torch.tanh(self.refinement_stage.regressor(f3))
+        else:
+            p3_pred = self.refinement_stage(p2_pred)
         if self.refinement == 'local':
             # Stage-2 flattens (parent, child), so each scale belongs to two
             # consecutive children. This correspondence is preserved by Stage-3.
-            scale = aux['local_scale'].repeat_interleave(2, dim=1)
+            scale = gather_parent(aux['local_scale'], aux['parent_idx'])
             offset = (p3_pred - p2_pred).transpose(1, 2)
             bounded, shrink = bound_refinement_offset(offset, scale, self.refine_radius)
             p3_pred = p2_pred + bounded.transpose(1, 2)
@@ -59,6 +90,12 @@ class CRNet(torch.nn.Module):
                 aux.update(refine_raw_move_over_d=offset.norm(dim=-1) / scale.squeeze(-1),
                            refine_move_over_d=bounded.norm(dim=-1) / scale.squeeze(-1),
                            refine_shrink=shrink.squeeze(-1))
+
+        if hasattr(self, 'cross_stage_refiner'):
+            extra_move = self.cross_stage_refiner.residual(f3, aux)
+            p3_pred = p3_pred + extra_move
+            if return_aux:
+                aux['refine_geo_move_over_d'] = extra_move.transpose(1, 2).norm(dim=-1) / gather_parent(aux['local_scale'], aux['parent_idx']).squeeze(-1)
 
         p3_pred = p3_pred.permute(0, 2, 1).contiguous()
         p2_pred = p2_pred.permute(0, 2, 1).contiguous()
@@ -87,13 +124,23 @@ class SubNetwork(nn.Module):
         self.feature_extractor = Transformer_extractor(128, 64)
         self.up_unit = Upsampling_unit(up_ratio=up_ratio)  
         self.regressor = MLP_CONV(in_channel=128, layer_dims=[64, 3])
+        self.up_ratio = up_ratio
 
-    def forward(self, points):
+    def forward(self, points, return_aux=False):
         point_feat = self.feature_extractor(points)
         up_feat, duplicated_point = self.up_unit(point_feat, points)
         offest = self.regressor(up_feat)
         up_point = duplicated_point + torch.tanh(offest)
 
+        if return_aux:
+            # Both ConvTranspose1d(kernel=stride=ratio) and nearest duplication
+            # put consecutive children next to their corresponding parent.
+            count = points.shape[-1]
+            parent = torch.arange(count, device=points.device).repeat_interleave(self.up_ratio)
+            child = torch.arange(self.up_ratio, device=points.device).repeat(count)
+            return dict(points=up_point, point_feat=point_feat, up_feat=up_feat,
+                        parent_idx=parent[None].expand(points.shape[0], -1),
+                        child_idx=child[None].expand(points.shape[0], -1))
         return up_point
 
 

@@ -46,10 +46,26 @@ class GaussianSurfaceStage(nn.Module):
     def forward(self, points):
         return self.forward_with_aux(points)[0]
 
-    def forward_with_aux(self, points):
+    def prepare_features(self, feature, frame, parent_features):
+        return feature, {}
+
+    def adjust_children(self, uv, feature, frame, extra):
+        return uv
+
+    def adjust_height(self, height, frame, extra):
+        return height
+
+    def finish_children(self, feature, uv, frame, extra):
+        return extra
+
+    def compute_frame(self, xyz):
+        return local_pca_frame(xyz, self.k)
+
+    def forward_with_aux(self, points, parent_features=None):
         feature = self.feature_extractor(points)
         xyz = points.transpose(1, 2)
-        frame = local_pca_frame(xyz, self.k)
+        frame = self.compute_frame(xyz)
+        feature, extra = self.prepare_features(feature, frame, parent_features)
         scale = frame['scale']
         geometry = torch.cat((frame['ratios'], scale), dim=-1)
         raw = self.param_head(torch.cat((feature, geometry.transpose(1, 2)), dim=1)).transpose(1, 2)
@@ -74,15 +90,21 @@ class GaussianSurfaceStage(nn.Module):
             theta = math.pi * raw[..., 8:9].tanh()
             direction = torch.cat((theta.cos(), theta.sin()), dim=-1)
             uv = sigma.unsqueeze(-2) * self.sample(direction)
+            uv = self.adjust_children(uv, feature, frame, extra)
             u, v = uv.unbind(-1)
             abc = self.height_bound * raw[..., 9:12].tanh()
             if self.mode == 'tangent':
                 abc = torch.zeros_like(abc)
             a, b, c = abc.split(1, dim=-1)
             height = scale * (a * (u / scale).square() + b * (u / scale) * (v / scale) + c * (v / scale).square())
+            height = self.adjust_height(height, frame, extra)
             generated = (mu.unsqueeze(-2) + u[..., None] * tangent.unsqueeze(-2)
                          + v[..., None] * bitangent.unsqueeze(-2) + height[..., None] * normal.unsqueeze(-2))
             aux = dict(mu=mu, n_pred=normal, t1=tangent, t2=bitangent, sigma=sigma,
                        abc=abc, local_scale=scale, height=height, frame_valid=frame['valid'],
                        pca_ratios=frame['ratios'])
+            aux.update(self.finish_children(feature, uv, frame, extra))
+        count = xyz.shape[1]
+        aux['parent_idx'] = torch.arange(count, device=points.device).repeat_interleave(2)[None].expand(points.shape[0], -1)
+        aux['child_idx'] = torch.arange(2, device=points.device).repeat(count)[None].expand(points.shape[0], -1)
         return generated.flatten(1, 2).transpose(1, 2).contiguous(), aux
