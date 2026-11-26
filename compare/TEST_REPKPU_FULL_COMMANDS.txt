@@ -1,0 +1,117 @@
+RepKPU官方预训练：两个数据集完整测试（2026-11-26）
+
+目标
+- PU1K全部127个、PU-GAN全部27个物体，共154份8192点预测，输入2048点。
+- 复用之前四网络正式测试的固定输入、GT、网格、原生推断路径和统一指标。
+- 只加载官方RepKPU权重做推断，不训练；每次自动创建独立结果目录及压缩包。
+- 原四网络和PU-Gaussian官方预训练结果保留，新增标签为RepKPU-pretrained。
+
+一、本机通过Git上传
+
+两份官方权重已下载到compare/RepKPU-main/pretrain/，合计约8.5 MB。
+该目录包含原始官方训练日志、来源说明和SHA256，需随脚本一起提交。
+在本机PowerShell逐条执行：
+
+cd D:\dkwork\Gaussian
+git add .gitignore compare/test_examples.py compare/test_repkpu_pretrained_full.py compare/tests/test_examples_export.py compare/TEST_REPKPU_FULL_COMMANDS.txt compare/TEST_EXAMPLES_COMMANDS.txt compare/RepKPU-main/pretrain
+git diff --cached --stat
+git commit -m "Add full two-dataset RepKPU pretrained evaluation"
+git push origin main
+
+二、服务器拉取并运行
+
+cd /home/zk/Gaussian
+git pull --ff-only
+conda activate scdata-v3
+python -u compare/test_repkpu_pretrained_full.py
+
+默认即两个完整测试集，不需要添加--metrics，不提供样例数量或物体筛选参数。
+启动时应依次显示127 test objects和27 test objects，结束标志FULL TEST COMPLETED。
+沿用现有服务器依赖和GPU 0，不安装新依赖，不需要访问Google Drive。
+
+只检查完整性和执行计划，不推断、不创建结果目录：
+
+python compare/test_repkpu_pretrained_full.py --plan
+
+需要后台运行时，使用下面两条；不要与前台命令同时启动：
+
+nohup python -u compare/test_repkpu_pretrained_full.py > compare/repkpu_pretrained_full.log 2>&1 &
+tail -n 40 -F compare/repkpu_pretrained_full.log
+
+三、权重版本
+
+PU1K：compare/RepKPU-main/pretrain/pu1k_exp1_best.pth
+PU-GAN：compare/RepKPU-main/pretrain/pugan_best.pth
+
+官方README：https://github.com/EasyRy/RepKPU#testing--evaluation
+PU1K官方提供exp1/exp2/exp3，本次预先固定exp1。
+PU-GAN使用官方常规版本，与当前重训RepKPU的结构匹配。
+官方另列PU-GAN *论文原版，使用RepKPU_o和另一套参数；本入口不加载该版本。
+脚本会检查固定SHA256，选错数据集、混入论文原版或其他实验文件会在写结果前报错。
+原始best轮次不从本项目重训轮次推断，记录为null。
+
+四、数据与推断参照
+
+默认正式运行：
+/home/zk/Gaussian/compare/retrain-runs/train-seed42-20261123-161953-503869/
+
+默认数据：正式run.json中记录的prepared目录，当前为：
+/home/zk/Gaussian/data/repro_20261123_seed42/
+
+分别读取原RepKPU的config/status/test协议作为配置和数据参照。
+推断使用NativeAdapter.infer，仍为官方test.upsampling的patch提取、预测和FPS流程。
+seed42，每个物体沿用正式测试的名称派生种子；模型严格加载全部state_dict。
+输入、GT、网格的名称、数量及哈希必须与原正式测试一致。
+需要完整测试集及RepKPU归档配置，但无需训练H5或重训best.pth参与推断。
+
+如服务器目录不同，可指定：
+--training-run /完整正式运行目录
+--prepared-root /包含PU1K和PU-GAN的新数据根目录
+--pretrained-root /上述两份固定官方权重所在目录
+
+只测试其中一个完整数据集：
+python -u compare/test_repkpu_pretrained_full.py --datasets pu1k
+python -u compare/test_repkpu_pretrained_full.py --datasets pugan
+
+五、输出与指标
+
+compare/test-runs/test-时间戳-repkpu-pretrained-full/
+  run.json                         # 版本、源权重URL/哈希、配置、数据哈希、full-test-set
+  files.csv / README.txt
+  jobs/                            # 两个数据集任务、日志、原生参数、逐物体推断耗时
+  metrics/
+    summary.csv                    # 两行，分别127/27物体的等权均值
+    per_shape.csv                  # 154行
+    protocol.json
+  pu1k/物体名/
+    input_2048.xyz / .ply
+    gt_8192.xyz / .ply
+    gt_mesh.off
+    RepKPU-pretrained.xyz / .ply
+  pugan/物体名/                    # 同样结构
+
+同时生成同名.tar.gz，结束后打印Download archive的实际路径。
+默认不逐物体绘制PNG；回传后可与原四网络和官方PU-Gaussian制作统一对照图。
+
+CD：预测与GT各自质心/最大半径归一化后的双向最近邻平方距离均值之和。
+HD：相同归一化下，两个方向最大平方距离取max；另保存两个方向值。
+P2F：保存坐标下，到GT连续三角网格的无符号欧氏距离均值。
+P2F_P99：逐物体P99后按物体等权平均。
+显示值均乘1000，与当前四网络及PU-Gaussian官方预训练测试口径一致。
+当前HD为max定义，与旧论文工具中的方向求和HD需区别，不能直接混比。
+
+官方预训练与独立划分重训的训练条件不同，新增结果单独报告。
+本次沿用已适配的官方推断函数，不宣称已经独立复现未经适配的全部官方工具链。
+
+六、回传
+
+按之前相同方式下载本次打印的.tar.gz到本机compare/test-runs/，在该目录解压。
+结果本身不通过Git上传。完整包包括输入、GT、网格、预测、指标与日志。
+回传后可以直接与之前五种模型/权重来源并排比较。
+
+七、若仅想对少量物体并排看重训版与官方版
+
+这不是完整测试命令，默认每数据集5物体：
+python -u compare/test_examples.py --models RepKPU RepKPU-pretrained --metrics --tag repkpu-examples
+
+通常本次直接执行第二节的专用完整测试即可。

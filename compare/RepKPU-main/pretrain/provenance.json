@@ -1,0 +1,40 @@
+{
+  "repository": "https://github.com/EasyRy/RepKPU",
+  "selection": "PU1K exp1 fixed before our evaluation; PU-GAN current official release, not paper-original",
+  "checkpoints": [
+    {
+      "dataset": "pu1k",
+      "filename": "pu1k_exp1_best.pth",
+      "downloaded_on": "2026-11-26",
+      "original_filename": "ckpt-best.pth",
+      "bytes": 4218975,
+      "sha256": "53629847526615c5cb9a036b88412b659698eb7fa69b4d4a50ffc69761534266",
+      "source_url": "https://drive.google.com/file/d/1Y9JXbVHoBATXd6XK_Tv3kTVnY5Owe4_-/view",
+      "source_folder": "https://drive.google.com/drive/folders/1hBp5Mngp5P5JBsLvAn-zYRv5aV3shmO_",
+      "architecture": "RepKPU (current), not RepKPU_o",
+      "experiment": "exp1",
+      "original_best_epoch": null,
+      "state_dict_entries": 337,
+      "keys_and_shapes_match_current_retrained": true,
+      "official_log": "pu1k_exp1_train_log.txt",
+      "official_log_sha256": "eb1fd6c2615d32573ae3a23ea55955dba55a33c2f61a09c919ca3a256daf45a1"
+    },
+    {
+      "dataset": "pugan",
+      "filename": "pugan_best.pth",
+      "downloaded_on": "2026-11-26",
+      "original_filename": "ckpt-best.pth",
+      "bytes": 4243775,
+      "sha256": "cb917b6905668766ec2bf7954919b1dd45f4ff9dad6338afcc2f278ac5cedd56",
+      "source_url": "https://drive.google.com/file/d/1vYKh5_wpOM8_S7eXe8IFy1j4up4RHjca/view",
+      "source_folder": "https://drive.google.com/drive/folders/1Iv2pPePqDXRSiDalrFiDDtJ4WiseCdhZ",
+      "architecture": "RepKPU (current), not RepKPU_o",
+      "experiment": null,
+      "original_best_epoch": null,
+      "state_dict_entries": 481,
+      "keys_and_shapes_match_current_retrained": true,
+      "official_log": "pugan_train_log.txt",
+      "official_log_sha256": "696a2b99b6f0611e3837b160e63237097a9ef06bdbed52100510a232a07692f4"
+    }
+  ]
+}

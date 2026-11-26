@@ -22,8 +22,37 @@ DATASETS = {'pu1k': 'PU1K', 'pugan': 'PU-GAN'}
 FULL_TEST_COUNTS = {'pu1k': 127, 'pugan': 27}
 DEFAULT_RUN = ROOT / 'compare/retrain-runs/train-seed42-20261123-161953-503869'
 PRETRAINED_MODEL = 'PU-Gaussian-pretrained'
-EXAMPLE_MODELS = (*DEFAULT_MODELS, PRETRAINED_MODEL)
+REPKPU_PRETRAINED_MODEL = 'RepKPU-pretrained'
+PRETRAINED_MODELS = {PRETRAINED_MODEL: 'PU-Gaussian', REPKPU_PRETRAINED_MODEL: 'RepKPU'}
+EXAMPLE_MODELS = (*DEFAULT_MODELS, *PRETRAINED_MODELS)
 PRETRAINED_ROOT = ROOT / 'compare/PU-Gaussian-main/pretrained_model'
+REPKPU_PRETRAINED_ROOT = ROOT / 'compare/RepKPU-main/pretrain'
+# Pin the official current-model checkpoints before any evaluation. PU1K has
+# three released experiments; exp1 is fixed here, not chosen using our test CD.
+REPKPU_CHECKPOINTS = {
+    'pu1k': dict(filename='pu1k_exp1_best.pth', variant='official-current-pu1k-exp1',
+                file_id='1Y9JXbVHoBATXd6XK_Tv3kTVnY5Owe4_-',
+                sha256='53629847526615c5cb9a036b88412b659698eb7fa69b4d4a50ffc69761534266'),
+    'pugan': dict(filename='pugan_best.pth', variant='official-current-pugan',
+                 file_id='1vYKh5_wpOM8_S7eXe8IFy1j4up4RHjca',
+                 sha256='cb917b6905668766ec2bf7954919b1dd45f4ff9dad6338afcc2f278ac5cedd56'),
+}
+
+
+def official_checkpoint(args, model, dataset):
+    if model == PRETRAINED_MODEL:
+        checkpoint = args.pretrained_root.expanduser().resolve() / f'pu_gaussian_{dataset}_Best.pth'
+        return (checkpoint, sha256(checkpoint),
+                'https://github.com/mvg-inatech/PU-Gaussian/blob/main/pretrained_model/' + checkpoint.name,
+                'official-dataset-specific')
+    spec = REPKPU_CHECKPOINTS[dataset]
+    root = getattr(args, 'repkpu_pretrained_root', REPKPU_PRETRAINED_ROOT)
+    checkpoint = root.expanduser().resolve() / spec['filename']
+    digest = sha256(checkpoint)
+    if digest != spec['sha256']:
+        raise ValueError(f'RepKPU official checkpoint hash mismatch: {checkpoint}; '
+                         'use the documented PU1K exp1 / current PU-GAN release')
+    return checkpoint, digest, 'https://drive.google.com/file/d/' + spec['file_id'] + '/view', spec['variant']
 
 
 def prepared_root(args):
@@ -92,16 +121,18 @@ def build_plan(args):
             selections[dataset].append(dict(shape=name, sources={k: str(p) for k, p in paths.items()},
                                            sha256={k: sha256(p) for k, p in paths.items()}))
         for model in args.models:
-            pretrained = model == PRETRAINED_MODEL
-            native_model = 'PU-Gaussian' if pretrained else model
+            pretrained = model in PRETRAINED_MODELS
+            native_model = PRETRAINED_MODELS.get(model, model)
             folder = training / dataset / native_model
             config = read_json(folder / 'config.json')
             status = read_json(folder / 'status.json')
             if config['model'] != native_model or config['dataset'] != dataset or status['status'] != 'completed':
                 raise ValueError(f'Model/config/status mismatch: {folder}')
-            checkpoint = (args.pretrained_root.expanduser().resolve() / f'pu_gaussian_{dataset}_Best.pth'
-                          if pretrained else folder / 'best.pth')
-            digest = sha256(checkpoint)
+            if pretrained:
+                checkpoint, digest, origin, variant = official_checkpoint(args, model, dataset)
+            else:
+                checkpoint = folder / 'best.pth'
+                digest, origin, variant = sha256(checkpoint), str(folder / 'status.json'), 'retrained'
             if not pretrained and digest != status['best_sha256']:
                 raise ValueError(f'Best checkpoint hash changed: {checkpoint}')
             protocol = read_json(folder / 'test/metrics/protocol.json')
@@ -121,8 +152,7 @@ def build_plan(args):
             jobs.append(dict(dataset=dataset, model=model, checkpoint=str(checkpoint),
                 checkpoint_sha256=digest, best_epoch=None if pretrained else status['best_epoch'], config=config,
                 checkpoint_source='official-pretrained' if pretrained else 'retrained-best',
-                checkpoint_origin=('https://github.com/mvg-inatech/PU-Gaussian/blob/main/pretrained_model/'
-                                   + checkpoint.name) if pretrained else str(folder / 'status.json'),
+                checkpoint_origin=origin, checkpoint_variant=variant,
                 adapter_config_source=str(folder / 'config.json'),
                 training_manifest=None if pretrained else str(folder / 'manifest.json')))
     return dict(status='planned', training_run=str(training), prepared_root=str(prepared),
@@ -306,10 +336,10 @@ def export_run(run_dir):
                 ply = xyz.with_suffix('.ply')
                 write_ply(ply, points)
                 display = label
-                if label == PRETRAINED_MODEL:
-                    display = 'PU-Gaussian\nOfficial pretrained'
-                elif label == 'PU-Gaussian':
-                    display = f'PU-Gaussian\nRetrained (epoch {jobs[dataset, label]["best_epoch"]})'
+                if label in PRETRAINED_MODELS:
+                    display = PRETRAINED_MODELS[label] + '\nOfficial pretrained'
+                elif label in ('PU-Gaussian', 'RepKPU'):
+                    display = f'{label}\nRetrained (epoch {jobs[dataset, label]["best_epoch"]})'
                 clouds.append((display, points))
                 rows.append(dict(dataset=dataset, shape=sample['shape'], label=label, points=count,
                     xyz=xyz.relative_to(run_dir).as_posix(), ply=ply.relative_to(run_dir).as_posix(),
@@ -343,8 +373,10 @@ def export_run(run_dir):
         'Pairing means the same object, not point-by-point correspondence with GT.\n\n'
         'files.csv uses portable relative paths. run.json records shapes, seeds, data\n'
         'hashes, adapter config, weight sources and checkpoint hashes/epochs.\n'
-        'PU-Gaussian is the retrained best; PU-Gaussian-pretrained is the official\n'
-        'dataset-specific checkpoint. Its original epoch is unknown (null), not 105.\n'
+        'PU-Gaussian and RepKPU labels use our retrained best checkpoints. Labels\n'
+        'ending in -pretrained use official checkpoints, with original epoch\n'
+        'unknown (null). RepKPU uses fixed PU1K exp1 and current PU-GAN releases;\n'
+        'the separate PU-GAN paper-original architecture is not used here.\n'
         'jobs/ contains inference logs/results; training manifests apply only to\n'
         'our retrained weights, not the official pretrained checkpoint.\n'
         'With --metrics, metrics/ contains diagnostic per-shape/mean CD, squared\n'
@@ -380,7 +412,7 @@ def export_metrics(run_dir, plan, rows):
         P2F_P99='per-shape P99 followed by equal-shape mean', display_scale=1000,
         evaluator_sha256=sha256(Path(__file__).with_name('evaluate_pugaussian_protocol.py')),
         checkpoints=[{key: job[key] for key in ('dataset', 'model', 'checkpoint_sha256',
-                    'checkpoint_source', 'checkpoint_origin', 'best_epoch')} for job in plan['jobs']]))
+                    'checkpoint_source', 'checkpoint_origin', 'checkpoint_variant', 'best_epoch')} for job in plan['jobs']]))
     for row in summary:
         print(f'{row["dataset"]}/{row["model"]}: CD={row["CD_x1000"]:.6f}, '
               f'HD={row["HD_x1000"]:.6f}, P2F={row["P2F_x1000"]:.6f} (x1000)', flush=True)
@@ -437,9 +469,11 @@ def parser():
     result.add_argument('--prepared-root', type=Path, help='Prepared data root containing PU1K/ and PU-GAN/')
     result.add_argument('--datasets', choices=DATASETS, nargs='+', default=list(DATASETS))
     result.add_argument('--models', choices=EXAMPLE_MODELS, nargs='+', default=list(DEFAULT_MODELS),
-                        help='PU-Gaussian is retrained; PU-Gaussian-pretrained uses official weights')
+                        help='Labels ending in -pretrained use official weights; other labels are retrained')
     result.add_argument('--pretrained-root', type=Path, default=PRETRAINED_ROOT,
                         help='Folder containing official pu_gaussian_{pu1k,pugan}_Best.pth')
+    result.add_argument('--repkpu-pretrained-root', type=Path, default=REPKPU_PRETRAINED_ROOT,
+                        help='Folder containing pinned official pu1k_exp1_best.pth and pugan_best.pth')
     result.add_argument('--num-examples', type=int, default=5, help='Fixed random sample size per dataset')
     result.add_argument('--shapes', nargs='+', help='Exact test shape stems (or .xyz names); overrides sample size')
     result.add_argument('--all-shapes', action='store_true', help='Use all 127 PU1K / 27 PU-GAN test objects; no sampling')

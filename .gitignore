@@ -22,3 +22,4 @@ __pycache__/
 /compare/evaluation-runs/
 /compare/test-runs/
 /compare/pugaussian_pretrained_full.log
+/compare/repkpu_pretrained_full.log

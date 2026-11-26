@@ -1,4 +1,8 @@
-点云样例测试与PU-Gaussian官方权重对照（2026-11-26）
+点云样例测试与官方预训练权重对照（2026-11-26）
+
+RepKPU官方权重双数据集完整测试：python -u compare/test_repkpu_pretrained_full.py
+完整同步与运行命令见 compare/TEST_REPKPU_FULL_COMMANDS.txt。
+PU1K固定官方exp1，PU-GAN为与当前实现匹配的官方常规版本，标签RepKPU-pretrained。
 
 当前需要的是完整测试集时，使用 compare/test_pugaussian_pretrained_full.py，
 完整运行命令见 compare/TEST_PUGAUSSIAN_FULL_COMMANDS.txt。
@@ -9,7 +13,7 @@
 在已有 scdata-v3 服务器环境运行，只做推断，不训练。
 默认使用本轮正式重训目录中，各数据集的 E0/E6/RepKPU/PU-Gaussian best.pth。
 Grad-PU 不在此入口中。
-默认仍只跑本轮重训的四网络；官方PU-Gaussian权重通过额外模型名显式选择。
+默认仍只跑本轮重训的四网络；两种官方预训练权重通过带-pretrained的模型名显式选择。
 
 一、本机通过 Git 上传，服务器拉取
 
