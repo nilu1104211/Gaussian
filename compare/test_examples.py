@@ -418,12 +418,117 @@ def export_metrics(run_dir, plan, rows):
               f'HD={row["HD_x1000"]:.6f}, P2F={row["P2F_x1000"]:.6f} (x1000)', flush=True)
 
 
-def package_run(run_dir):
-    archive = run_dir.with_suffix('.tar.gz')
-    # Exclusive creation: neither previous results nor previous archives are replaced.
-    with tarfile.open(archive, 'x:gz') as stream:
-        stream.add(run_dir, arcname=run_dir.name)
+def package_run(run_dir, archive=None):
+    run_dir = Path(run_dir)
+    archive = Path(archive) if archive else run_dir.with_suffix('.tar.gz')
+    partial = archive.with_name(archive.name + '.partial')
+    if archive.exists():
+        raise FileExistsError(archive)
+    paths = [run_dir, *sorted(run_dir.rglob('*'))]
+    total = sum(p.stat().st_size for p in paths if p.is_file())
+    print(f'Packaging {total / 1024**2:.1f} MiB; gzip level 1. '
+          'Inference/export are complete; no GPU work remains.', flush=True)
+    print(f'Temporary archive: {partial}', flush=True)
+    done, reported = 0, time.monotonic()
+    # An interruption leaves only an explicitly named .partial file. Final
+    # publication is exclusive on both Windows and POSIX, preserving old files.
+    with tarfile.open(partial, 'x:gz', compresslevel=1) as stream:
+        for path in paths:
+            stream.add(path, arcname=path.relative_to(run_dir.parent).as_posix(), recursive=False)
+            if path.is_file():
+                done += path.stat().st_size
+            if time.monotonic() - reported >= 5:
+                print(f'Packaging: {done / max(total, 1):.1%} '
+                      f'({done / 1024**2:.1f}/{total / 1024**2:.1f} MiB)', flush=True)
+                reported = time.monotonic()
+    if os.name == 'nt':
+        partial.rename(archive)  # Windows rename refuses an existing destination.
+    else:
+        os.link(partial, archive)  # POSIX rename could overwrite a competing archive.
+        partial.unlink()
+    print(f'Packaging: 100%; archive ready ({archive.stat().st_size / 1024**2:.1f} MiB)', flush=True)
     return archive
+
+
+def validate_export_for_packaging(run_dir):
+    """Validate existing artifacts without importing models or recomputing metrics."""
+    plan = read_json(run_dir / 'run.json')
+    if plan.get('status') not in ('completed', 'failed') or not plan.get('finished_at'):
+        raise ValueError('Inference/export did not finish; package-only cannot resume inference')
+
+    def rows(path):
+        with path.open(encoding='utf-8-sig', newline='') as stream:
+            return list(csv.DictReader(stream))
+
+    expected, expected_predictions = set(), set()
+    for dataset, samples in plan['selections'].items():
+        for sample in samples:
+            folder = run_dir / dataset / sample['shape']
+            for label in ('Input', 'GT', *plan['models']):
+                expected.add((dataset, sample['shape'], label))
+            expected_predictions.update((dataset, model, sample['shape']) for model in plan['models'])
+            for key, filename in [('input', 'input_2048.xyz'), ('gt', 'gt_8192.xyz'), ('mesh', 'gt_mesh.off')]:
+                if sha256(folder / filename) != sample['sha256'][key]:
+                    raise ValueError(f'Export source hash mismatch: {folder / filename}')
+    files = rows(run_dir / 'files.csv')
+    if len(files) != len(expected) or {(r['dataset'], r['shape'], r['label']) for r in files} != expected:
+        raise ValueError('Incomplete exported file inventory')
+    for row in files:
+        for key in ('xyz', 'ply'):
+            path = (run_dir / row[key]).resolve()
+            if not path.is_relative_to(run_dir) or not path.is_file():
+                raise ValueError(f'Missing or invalid exported {key}: {row[key]}')
+        if sha256(run_dir / row['xyz']) != row['xyz_sha256']:
+            raise ValueError(f'Exported XYZ hash mismatch: {row["xyz"]}')
+    if plan.get('metrics'):
+        protocol = read_json(run_dir / 'metrics/protocol.json')
+        per_shape = rows(run_dir / 'metrics/per_shape.csv')
+        summary = rows(run_dir / 'metrics/summary.csv')
+        counts = {dataset: len(samples) for dataset, samples in plan['selections'].items()}
+        if protocol.get('status') != 'completed' or protocol.get('n_shapes') != counts:
+            raise ValueError('Metric export did not complete')
+        if (len(per_shape) != len(expected_predictions)
+                or {(r['dataset'], r['model'], r['shape']) for r in per_shape} != expected_predictions):
+            raise ValueError('Incomplete per-shape metrics')
+        expected_summary = {(ds, model, str(count)) for ds, count in counts.items() for model in plan['models']}
+        if (len(summary) != len(expected_summary)
+                or {(r['dataset'], r['model'], r['n_shapes']) for r in summary} != expected_summary):
+            raise ValueError('Incomplete summary metrics')
+    return plan
+
+
+def archive_completed_run(run_dir, plan, archive=None):
+    try:
+        result = package_run(run_dir, archive)
+    except BaseException as error:
+        # A compression failure must not relabel completed inference as failed.
+        plan['archive_error'] = str(error) or type(error).__name__
+        write_json(run_dir / 'run.json', plan)
+        print(f'Inference/export remain completed. To package only: '
+              f'python compare/test_examples.py --package-run "{run_dir}"', flush=True)
+        raise
+    print(f'Download archive: {result}', flush=True)
+    return result
+
+
+def repackage_run(run_dir):
+    run_dir = Path(run_dir).expanduser().resolve()
+    print(f'Checking existing export: {run_dir}', flush=True)
+    plan = validate_export_for_packaging(run_dir)
+    # Older launchers labelled the whole run failed when compression was interrupted.
+    if plan.get('error'):
+        plan['recovered_archive_error'] = plan.pop('error')
+    plan.pop('archive_error', None)
+    plan['status'] = 'completed'
+    plan['repackaged_at'] = datetime.now().astimezone().isoformat()
+    write_json(run_dir / 'run.json', plan)
+    archive = run_dir.with_suffix('.tar.gz')
+    if archive.exists() or archive.with_name(archive.name + '.partial').exists():
+        stamp = datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+        archive = run_dir.with_name(run_dir.name + f'-repacked-{stamp}.tar.gz')
+    result = archive_completed_run(run_dir, plan, archive)
+    print(f'PACKAGE COMPLETED: {result}', flush=True)
+    return result
 
 
 def execute(args):
@@ -452,13 +557,12 @@ def execute(args):
         plan['status'] = 'completed'
         plan['finished_at'] = datetime.now().astimezone().isoformat()
         write_json(run_dir / 'run.json', plan)
-        if plan['archive']:
-            archive = package_run(run_dir)
-            print(f'Download archive: {archive}', flush=True)
     except BaseException as error:
         plan.update(status='failed', error=str(error) or type(error).__name__)
         write_json(run_dir / 'run.json', plan)
         raise
+    if plan['archive']:
+        archive_completed_run(run_dir, plan)
     completed = 'FULL TEST COMPLETED' if plan['test_scope'] == 'full-test-set' else 'EXAMPLE TEST COMPLETED'
     print(f'{completed}: {run_dir}', flush=True)
 
@@ -488,6 +592,7 @@ def parser():
     modes.add_argument('--list-shapes', action='store_true', help='List available paired test shapes without loading models')
     modes.add_argument('--worker-job', type=Path, help=argparse.SUPPRESS)
     modes.add_argument('--export-run', type=Path, help=argparse.SUPPRESS)
+    modes.add_argument('--package-run', type=Path, help='Package an existing completed export without inference')
     return result
 
 
@@ -498,6 +603,8 @@ def main():
         infer_job(args.worker_job)
     elif args.export_run:
         export_run(args.export_run)
+    elif args.package_run:
+        repackage_run(args.package_run)
     else:
         if not re.fullmatch(r'[A-Za-z0-9_-]+', args.tag):
             options.error('--tag must contain only ASCII letters, digits, hyphen and underscore')

@@ -13,7 +13,7 @@ RepKPU官方预训练：两个数据集完整测试（2026-11-26）
 在本机PowerShell逐条执行：
 
 cd D:\dkwork\Gaussian
-git add .gitignore compare/test_examples.py compare/test_repkpu_pretrained_full.py compare/tests/test_examples_export.py compare/TEST_REPKPU_FULL_COMMANDS.txt compare/TEST_EXAMPLES_COMMANDS.txt compare/RepKPU-main/pretrain
+git add .gitignore compare/test_examples.py compare/test_repkpu_pretrained_full.py compare/test_pugaussian_pretrained_full.py compare/tests/test_examples_export.py compare/TEST_REPKPU_FULL_COMMANDS.txt compare/TEST_EXAMPLES_COMMANDS.txt compare/RepKPU-main/pretrain
 git diff --cached --stat
 git commit -m "Add full two-dataset RepKPU pretrained evaluation"
 git push origin main
@@ -91,6 +91,8 @@ compare/test-runs/test-时间戳-repkpu-pretrained-full/
   pugan/物体名/                    # 同样结构
 
 同时生成同名.tar.gz，结束后打印Download archive的实际路径。
+打包使用gzip level 1，并显示数据大小和进度；此时推断和指标已完成，无GPU任务。
+最终.tar.gz仅在打包成功后发布，中断时保留明确标注的.partial临时文件。
 默认不逐物体绘制PNG；回传后可与原四网络和官方PU-Gaussian制作统一对照图。
 
 CD：预测与GT各自质心/最大半径归一化后的双向最近邻平方距离均值之和。
@@ -115,3 +117,30 @@ P2F_P99：逐物体P99后按物体等权平均。
 python -u compare/test_examples.py --models RepKPU RepKPU-pretrained --metrics --tag repkpu-examples
 
 通常本次直接执行第二节的专用完整测试即可。
+
+八、已经输出指标，Ctrl+C中断在打包时：只打包，不重跑测试
+
+若Traceback位于package_run/tarfile/gzip，已有预测和CSV不需要重新推断或计算。
+早期脚本会把这类中断记成run.json的status=failed，并留下不完整.tar.gz。
+新版将推断/导出状态与打包错误分开；只打包入口也兼容早期记录。
+
+本机只提交这次打包修复，然后推送（此前权重和测试脚本已提交时）：
+
+git add compare/test_examples.py compare/test_repkpu_pretrained_full.py compare/test_pugaussian_pretrained_full.py compare/tests/test_examples_export.py compare/TEST_REPKPU_FULL_COMMANDS.txt
+git commit -m "Recover interrupted result packaging without rerunning inference"
+git push origin main
+
+服务器拉取后，自动定位最近一次RepKPU完整测试目录并只打包：
+
+cd /home/zk/Gaussian
+git pull --ff-only
+conda activate scdata-v3
+run_dir=$(find compare/test-runs -mindepth 1 -maxdepth 1 -type d -name 'test-*-repkpu-pretrained-full' | sort | tail -n 1)
+python -u compare/test_repkpu_pretrained_full.py --package-run "$run_dir"
+
+也可以将--package-run后的路径替换成当时Test directory打印的确切目录。
+该模式只依赖已导出的结果目录，无需原始数据、训练目录、权重或CUDA。
+开始会校验已有XYZ/PLY/网格清单、XYZ/网格哈希及完整指标行数，不重算指标。
+旧.tar.gz或.partial存在时，自动另存为*-repacked-时间戳.tar.gz，旧文件保留。
+成功标志PACKAGE COMPLETED，下载新打印的Download archive路径。
+若推断/导出未完成，则拒绝只打包，不会把不完整结果改记成成功。

@@ -21,7 +21,9 @@ def parse_args(argv=None):
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--output-root', type=Path, default=examples.ROOT / 'compare/test-runs')
     parser.add_argument('--tag', default='pugaussian-pretrained-full')
-    parser.add_argument('--plan', action='store_true', help='Check full object counts, names and hashes without inference/writes')
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument('--plan', action='store_true', help='Check full object counts, names and hashes without inference/writes')
+    modes.add_argument('--package-run', type=Path, help='Package an existing export without inference')
     parser.add_argument('--no-archive', action='store_true')
     args = parser.parse_args(argv)
     if len(set(args.datasets)) != len(args.datasets):
@@ -40,7 +42,11 @@ def parse_args(argv=None):
 
 
 def main(argv=None):
-    examples.execute(parse_args(argv))
+    args = parse_args(argv)
+    if args.package_run:
+        examples.repackage_run(args.package_run)
+    else:
+        examples.execute(args)
 
 
 if __name__ == '__main__':

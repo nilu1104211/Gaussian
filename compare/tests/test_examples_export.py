@@ -177,6 +177,76 @@ def test_failed_worker_preserves_failed_run_without_success_archive(options, mon
     assert not list(options.output_root.glob('*.tar.gz'))
 
 
+@pytest.mark.parametrize('legacy_final_archive', [False, True])
+def test_interrupted_packaging_recovers_without_inference_or_metric_changes(options, monkeypatch, legacy_final_archive):
+    import json
+    import evaluate_pugaussian_protocol as metrics
+    import test_repkpu_pretrained_full as full
+
+    # GPU inference and optional mesh library are unnecessary for exercising the
+    # real export, checksum validation, interruption and archive recovery path.
+    def child(arguments, log_path, env):
+        log_path.write_text('CPU fixture worker\n')
+        if arguments[0] == '--export-run':
+            examples.export_run(Path(arguments[1]))
+            return
+        job = read_json(arguments[1])
+        for shape in job['shapes']:
+            folder = Path(job['run_dir']) / job['dataset'] / shape
+            points = np.loadtxt(folder / 'gt_8192.xyz', dtype=np.float32)
+            np.savetxt(folder / f'{job["model"]}.xyz', points, fmt='%.10g')
+
+    options.metrics = True
+    monkeypatch.setattr(examples, 'run_child', child)
+    monkeypatch.setattr(metrics, 'mesh_scene', lambda path: None)
+    monkeypatch.setattr(metrics, 'p2f_scores', lambda points, scene: dict(P2F=0., P2F_P99=0.))
+    original_add = tarfile.TarFile.add
+
+    def interrupt(stream, name, *args, **kwargs):
+        if Path(name).suffix == '.ply':
+            raise KeyboardInterrupt
+        return original_add(stream, name, *args, **kwargs)
+
+    monkeypatch.setattr(tarfile.TarFile, 'add', interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        examples.execute(options)
+    run, = (p for p in options.output_root.iterdir() if p.is_dir())
+    plan = read_json(run / 'run.json')
+    assert plan['status'] == 'completed' and plan['archive_error'] == 'KeyboardInterrupt'
+    assert not run.with_suffix('.tar.gz').exists()
+    partial = run.with_suffix('.tar.gz.partial')
+    assert partial.is_file()
+    if legacy_final_archive:
+        # Earlier launchers left a final-looking truncated gzip and marked the
+        # entire run failed, even though finished_at and all exports were saved.
+        partial.rename(run.with_suffix('.tar.gz'))
+        plan.update(status='failed', error=plan.pop('archive_error'))
+        write_json(run / 'run.json', plan)
+    existing_archives = {p: p.read_bytes() for p in options.output_root.iterdir() if p.is_file()}
+    artifacts = {p: sha256(p) for p in run.rglob('*') if p.is_file() and p.name != 'run.json'}
+    monkeypatch.setattr(tarfile.TarFile, 'add', original_add)
+
+    def no_worker(*args):
+        pytest.fail('package-only must never launch inference or metric workers')
+
+    monkeypatch.setattr(examples, 'run_child', no_worker)
+    full.main(['--package-run', str(run)])
+    assert read_json(run / 'run.json')['status'] == 'completed'
+    assert artifacts == {p: sha256(p) for p in artifacts}
+    assert existing_archives == {p: p.read_bytes() for p in existing_archives}
+    archive, = options.output_root.glob('*-repacked-*.tar.gz')
+    with tarfile.open(archive) as stream:
+        names = stream.getnames()
+        assert f'{run.name}/metrics/summary.csv' in names
+        assert json.load(stream.extractfile(f'{run.name}/run.json'))['status'] == 'completed'
+
+    summary = run / 'metrics/summary.csv'
+    summary.write_text(summary.read_text(encoding='utf-8-sig').splitlines()[0] + '\n', encoding='utf-8-sig')
+    with pytest.raises(ValueError, match='Incomplete summary metrics'):
+        full.main(['--package-run', str(run)])
+    assert list(options.output_root.glob('*-repacked-*.tar.gz')) == [archive]
+
+
 def gaussian_fixture(options):
     import shutil
     folder = options.training_run / 'pu1k/PU-Gaussian'
