@@ -276,6 +276,55 @@ def repkpu_fixture(options, monkeypatch):
     return folder
 
 
+def pucrn_fixture(options, monkeypatch):
+    options.pucrn_pretrained_root = options.training_run.parent / 'pucrn-release'
+    options.pucrn_pretrained_root.mkdir()
+    path = options.pucrn_pretrained_root / 'model.pth'
+    path.write_bytes(b'official-shared-pucrn-release')
+    monkeypatch.setitem(examples.PUCRN_CHECKPOINT, 'sha256', sha256(path))
+    return options.training_run / 'pu1k/E0'
+
+
+def test_pucrn_release_is_shared_and_never_claimed_as_retrained(options, monkeypatch):
+    import shutil
+    folder = pucrn_fixture(options, monkeypatch)
+    second = options.training_run / 'pugan/E0'
+    shutil.copytree(folder, second)
+    write_json(second / 'config.json', dict(dataset='pugan', model='E0', seed=42))
+    shutil.copytree(options.prepared_root / 'PU1K', options.prepared_root / 'PU-GAN')
+    options.datasets = ['pu1k', 'pugan']
+    options.models = [examples.PUCRN_PRETRAINED_MODEL]
+    (folder / 'best.pth').unlink()
+    (second / 'best.pth').unlink()
+    plan = examples.build_plan(options)
+    assert len(plan['jobs']) == 2
+    assert len({j['checkpoint'] for j in plan['jobs']}) == 1
+    assert len({j['checkpoint_sha256'] for j in plan['jobs']}) == 1
+    for job in plan['jobs']:
+        assert job['config']['model'] == 'E0'
+        assert job['config']['dataset'] == job['dataset']
+        assert job['checkpoint_source'] == 'official-pretrained'
+        assert job['best_epoch'] is None and job['training_manifest'] is None
+        assert job['checkpoint_format'] == 'net_state_dict'
+        assert 'shared-release' in job['checkpoint_variant'] and 'PU1K-reference' in job['checkpoint_variant']
+        assert job['checkpoint_origin'] == examples.PUCRN_CHECKPOINT['origin']
+    Path(plan['jobs'][0]['checkpoint']).write_bytes(b'wrong-weight')
+    with pytest.raises(ValueError, match='PU-CRN official checkpoint hash mismatch'):
+        examples.execute(options)
+    assert not options.output_root.exists()
+
+
+def test_official_pucrn_container_is_unwrapped_explicitly_without_partial_loading():
+    state = {'layer.weight': object()}
+    assert examples.inference_state_dict({'net_state_dict': state}, 'net_state_dict') is state
+    assert examples.inference_state_dict(state) is state
+    for invalid in (state, {'net_state_dict': {}}, {'net_state_dict': state, 'unexpected': 1}):
+        with pytest.raises(ValueError):
+            examples.inference_state_dict(invalid, 'net_state_dict')
+    with pytest.raises(ValueError, match='Unsupported'):
+        examples.inference_state_dict(state, 'guessed-format')
+
+
 def test_repkpu_official_sources_are_fixed_and_swapped_weights_fail_before_writes(options, monkeypatch):
     import shutil
     folder = repkpu_fixture(options, monkeypatch)
@@ -350,10 +399,16 @@ def test_official_only_needs_its_own_weights_and_missing_weights_fail_before_wri
 
 
 @pytest.mark.parametrize('native,label', [('PU-Gaussian', examples.PRETRAINED_MODEL),
-                                         ('RepKPU', examples.REPKPU_PRETRAINED_MODEL)])
+                                         ('RepKPU', examples.REPKPU_PRETRAINED_MODEL),
+                                         ('E0', examples.PUCRN_PRETRAINED_MODEL)])
 def test_pretrained_comparison_exports_both_sources_and_original_coordinate_metrics(options, monkeypatch, native, label):
     import evaluate_pugaussian_protocol as metrics
-    folder = gaussian_fixture(options) if native == 'PU-Gaussian' else repkpu_fixture(options, monkeypatch)
+    if native == 'PU-Gaussian':
+        folder = gaussian_fixture(options)
+    elif native == 'RepKPU':
+        folder = repkpu_fixture(options, monkeypatch)
+    else:
+        folder = pucrn_fixture(options, monkeypatch)
     expected_epoch = read_json(folder / 'status.json')['best_epoch']
     options.models = [native, label]
     options.shapes = ['shape.a', 'shape.b']
@@ -421,7 +476,8 @@ def test_pretrained_comparison_exports_both_sources_and_original_coordinate_metr
 
 
 @pytest.mark.parametrize('module,label', [('test_pugaussian_pretrained_full', examples.PRETRAINED_MODEL),
-                                         ('test_repkpu_pretrained_full', examples.REPKPU_PRETRAINED_MODEL)])
+                                         ('test_repkpu_pretrained_full', examples.REPKPU_PRETRAINED_MODEL),
+                                         ('test_pucrn_pretrained_full', examples.PUCRN_PRETRAINED_MODEL)])
 def test_full_entrypoint_requires_full_sets_and_has_no_sampling_flags(module, label):
     import importlib
     full = importlib.import_module(module)
@@ -480,7 +536,8 @@ def test_full_mode_rejects_partial_protocol_and_unmatched_labels(options, monkey
 
 
 @pytest.mark.parametrize('native,module', [('PU-Gaussian', 'test_pugaussian_pretrained_full'),
-                                           ('RepKPU', 'test_repkpu_pretrained_full')])
+                                           ('RepKPU', 'test_repkpu_pretrained_full'),
+                                           ('E0', 'test_pucrn_pretrained_full')])
 def test_full_pretrained_plan_covers_exactly_127_plus_27_objects(tmp_path, monkeypatch, native, module):
     import importlib
     full = importlib.import_module(module)
@@ -503,13 +560,15 @@ def test_full_pretrained_plan_covers_exactly_127_plus_27_objects(tmp_path, monke
         write_json(reference / 'status.json', dict(status='completed', best_epoch=105))
         write_json(reference / 'test/metrics/protocol.json', dict(status='completed', expected_shapes=count,
                    dataset=examples.DATASETS[dataset], source_hashes=hashes))
-        filename = (f'pu_gaussian_{dataset}_Best.pth' if native == 'PU-Gaussian'
-                    else examples.REPKPU_CHECKPOINTS[dataset]['filename'])
+        filename = (f'pu_gaussian_{dataset}_Best.pth' if native == 'PU-Gaussian' else
+                    examples.REPKPU_CHECKPOINTS[dataset]['filename'] if native == 'RepKPU' else 'model.pth')
         path = weights / filename
-        path.write_bytes(b'official-' + dataset.encode())
+        path.write_bytes(b'official-shared-release' if native == 'E0' else b'official-' + dataset.encode())
         if native == 'RepKPU':
             spec = examples.REPKPU_CHECKPOINTS[dataset]
             monkeypatch.setitem(examples.REPKPU_CHECKPOINTS, dataset, {**spec, 'sha256': sha256(path)})
+        elif native == 'E0':
+            monkeypatch.setitem(examples.PUCRN_CHECKPOINT, 'sha256', sha256(path))
     args = full.parse_args(['--training-run', str(training), '--prepared-root', str(prepared),
                             '--pretrained-root', str(weights)])
     plan = examples.build_plan(args)
@@ -521,3 +580,6 @@ def test_full_pretrained_plan_covers_exactly_127_plus_27_objects(tmp_path, monke
     assert all(job['checkpoint_source'] == 'official-pretrained' and job['best_epoch'] is None
                for job in plan['jobs'])
     assert plan['entrypoint'].endswith(module + '.py')
+    if native == 'E0':
+        assert len({job['checkpoint'] for job in plan['jobs']}) == 1
+        assert all(job['checkpoint_format'] == 'net_state_dict' for job in plan['jobs'])

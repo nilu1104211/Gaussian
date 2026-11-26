@@ -1,0 +1,36 @@
+{
+  "repository": "https://github.com/hikvision-research/3DVision",
+  "readme": "https://github.com/hikvision-research/3DVision/tree/main/PointUpsampling/PUCRN",
+  "checkpoint": "baseline/3DVision-main/PointUpsampling/PUCRN/model/release/model.pth",
+  "source_url": "https://github.com/hikvision-research/3DVision/blob/main/PointUpsampling/PUCRN/model/release/model.pth",
+  "raw_source_url": "https://raw.githubusercontent.com/hikvision-research/3DVision/main/PointUpsampling/PUCRN/model/release/model.pth",
+  "verified_on": "2026-11-26",
+  "bytes": 3462736,
+  "sha256": "900070c91fd8d4e9c34191d17795e32fb37af0e284d5b4b0c4434dd7fe9870a6",
+  "byte_identical_to_official_upstream": true,
+  "already_tracked_in_git": true,
+  "checkpoint_format": "net_state_dict",
+  "state_dict_entries": 153,
+  "original_best_epoch": null,
+  "reference_evaluation_dataset": "PU1K",
+  "training_dataset_note": "Not embedded in the checkpoint; supplied main.py and test.sh use PU1K paths. Do not claim separate dataset-specific releases.",
+  "same_checkpoint_for_both_test_datasets": true,
+  "test_datasets": ["pu1k", "pugan"],
+  "pugan_note": "Same released model evaluated on PU-GAN; no independently released PU-GAN checkpoint is claimed.",
+  "backbone": "NativeAdapter E0: stage2=baseline, refinement=legacy",
+  "keys_and_shapes_match_current_E0_for_both_datasets": true,
+  "cpu_reference_parity": {
+    "strict_loading": true,
+    "official_snapshot": "baseline/3DVision-main/PointUpsampling/PUCRN/model/release/code/network/PUCRN.py",
+    "grouping_operator": "Both CPU graphs use the same PyTorch reference grouping in place of the native CUDA extension",
+    "cases": [{"seed": 42, "input_points": 256}, {"seed": 43, "input_points": 256}, {"seed": 44, "input_points": 64}],
+    "max_abs_difference": 0.0,
+    "limitation": "CPU checks do not replace complete native CUDA inference on the server"
+  },
+  "official_source_text_verification": {
+    "comparison": "Local and official raw source match after LF normalization",
+    "test.sh_sha256": "a0b8dfa8f3b8449eef6fa7dfe9fff80abb33f163d1377c4af82c6e736b4df0bb",
+    "network_PUCRN.py_sha256": "0379f2239e0c5400d02ca6c799556d818f67e1f990e667684740e8e74e84553c",
+    "release_snapshot_network_PUCRN.py_sha256": "0379f2239e0c5400d02ca6c799556d818f67e1f990e667684740e8e74e84553c"
+  }
+}

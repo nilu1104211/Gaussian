@@ -1,0 +1,126 @@
+PU-CRN官方release权重：两个数据集完整测试（2026-11-26）
+
+目标
+- PU1K全部127个、PU-GAN全部27个物体，共154份8192点预测，输入2048点。
+- 使用前面各网络的相同固定输入、GT、网格、seed42与统一指标函数。
+- 仅加载官方权重推断；每次新建独立目录、导出XYZ/PLY及完整指标并打包。
+- 新标签PU-CRN-pretrained，与本轮重训E0以及E6区分。
+
+一、这次权重来源与数据集含义
+
+官方项目： https://github.com/hikvision-research/3DVision/tree/main/PointUpsampling/PUCRN
+官方README明确说明预训练权重位于model/release。
+
+本机已有且被Git跟踪的文件：
+baseline/3DVision-main/PointUpsampling/PUCRN/model/release/model.pth
+
+本次与官方原始文件逐字节核对一致：3462736字节。
+SHA256：900070c91fd8d4e9c34191d17795e32fb37af0e284d5b4b0c4434dd7fe9870a6
+
+目前核对到的是一份release，而非分别用于PU1K/PU-GAN的两份专用权重。
+官方附带的test.sh和evaluation.csv针对PU1K；权重本身只含net_state_dict。
+本次用同一份文件测试两个数据集，PU-GAN属于该release在PU-GAN上的额外评估。
+不会把它记为专门的官方PU-GAN训练权重，也不从文件名推断原始best轮次。
+训练数据和原始轮次未写入checkpoint，best_epoch记为null。
+
+两次测试会记录同一SHA256以及分别注明测试数据集的checkpoint_variant。
+完整来源和兼容记录见compare/pucrn_pretrained_provenance.json。
+
+二、本机通过Git上传
+
+在本机PowerShell逐条执行：
+
+cd D:\dkwork\Gaussian
+git add .gitignore compare/test_examples.py compare/test_pucrn_pretrained_full.py compare/tests/test_examples_export.py compare/TEST_PUCRN_FULL_COMMANDS.txt compare/TEST_EXAMPLES_COMMANDS.txt compare/pucrn_pretrained_provenance.json baseline/3DVision-main/PointUpsampling/PUCRN/model/release/model.pth
+git diff --cached --stat
+git commit -m "Add full two-dataset official PU-CRN release evaluation"
+git push origin main
+
+权重本来已被跟踪；这次无需下载依赖、重新训练或另外上传大模型目录。
+本次完整测试入口和共享测试脚本必须一同提交。
+
+三、服务器拉取并测试
+
+cd /home/zk/Gaussian
+git pull --ff-only
+conda activate scdata-v3
+python -u compare/test_pucrn_pretrained_full.py
+
+默认即两个完整测试集，指标默认开启，没有样例数量或物体筛选参数。
+启动时明确提示两个数据集使用同一份官方release，随后分别显示127和27 test objects。
+仍使用GPU 0及现有scdata-v3环境，不需要新编译CUDA扩展。
+
+只检查执行计划和哈希，不创建结果目录、不推断：
+python compare/test_pucrn_pretrained_full.py --plan
+
+后台运行（不要与前台同时启动）：
+nohup python -u compare/test_pucrn_pretrained_full.py > compare/pucrn_pretrained_full.log 2>&1 &
+tail -n 40 -F compare/pucrn_pretrained_full.log
+
+如只需要其中一个完整数据集：
+python -u compare/test_pucrn_pretrained_full.py --datasets pu1k
+python -u compare/test_pucrn_pretrained_full.py --datasets pugan
+
+四、配置和兼容性
+
+默认数据：/home/zk/Gaussian/data/repro_20261123_seed42/
+默认参照：/home/zk/Gaussian/compare/retrain-runs/train-seed42-20261123-161953-503869/
+分别使用原E0的config/status/test协议作为配置和数据参照，不加载其重训best.pth。
+
+官方checkpoint是{'net_state_dict': ...}容器，脚本明确取出后严格加载153个张量。
+其键名和形状与两个数据集的E0一致；使用stage2=baseline、refinement=legacy。
+3组CPU输入下，当前E0和官方发布网络的输出完全一致；双方用同一参考分组算子。
+该CPU检查不替代服务器完整原生CUDA推断。
+
+沿用NativeAdapter.infer的完整2048→8192推断、256点patch、重叠率3和最终FPS。
+输入、GT、网格数量/名称/哈希必须与正式E0测试一致；同物体使用相同派生种子。
+原始训练H5和E0重训best.pth不参与前向推断，但参照配置及测试协议需要保留。
+
+目录不同可显式指定：
+--training-run /完整正式训练归档
+--prepared-root /包含PU1K和PU-GAN的新数据根目录
+--pretrained-root /包含同一官方model.pth的目录
+
+五、输出与指标
+
+compare/test-runs/test-时间戳-pucrn-pretrained-full/
+  run.json / files.csv / README.txt
+  jobs/                       # 配置、权重来源/格式/哈希、逐物体日志与结果
+  metrics/
+    summary.csv               # 两行：127/27物体的等权均值
+    per_shape.csv             # 共154行
+    protocol.json
+  pu1k/物体名/
+    input_2048.xyz / .ply
+    gt_8192.xyz / .ply
+    gt_mesh.off
+    PU-CRN-pretrained.xyz / .ply
+  pugan/物体名/               # 同样结构
+
+自动生成同名.tar.gz，gzip level 1，显示大小及打包进度。
+结束标志FULL TEST COMPLETED，下载打印的Download archive路径，解压到本机compare/test-runs/。
+图像默认不逐物体绘制；回传后可把本次结果加入现有输入/GT及各网络总览。
+
+指标与前面各次完全一致，显示值均×1000，按物体等权平均：
+CD：预测与GT各自质心/最大半径归一化后的双向最近邻平方距离均值之和。
+HD：相同归一化后，两个方向最大平方距离取max；同时保留两个方向的值。
+P2F：保存坐标下到GT连续三角网格的无符号欧氏距离均值。
+P2F_P99：逐物体P99再等权平均。
+当前HD与旧工具方向求和口径需区分；不直接混比旧论文HD。
+
+官方release测试结果单独报告，训练协议与本项目重训不同，不替换原E0/E6主表。
+本次使用已适配的完整E0推断路径，不宣称独立跑完未经适配的所有原生工具链。
+
+六、若打包中断：只打包已有结果
+
+将下面参数替换成当时打印的Test directory：
+python -u compare/test_pucrn_pretrained_full.py --package-run compare/test-runs/test-实际时间-pucrn-pretrained-full
+
+会核对已有结果完整性，不重跑推断和指标；旧.tar.gz/.partial存在时另存repacked压缩包。
+看到PACKAGE COMPLETED后，下载新打印的Download archive路径。
+
+七、少量样例并排观察（不代表完整测试）
+
+python -u compare/test_examples.py --models E0 E6 PU-CRN-pretrained --metrics --tag pucrn-examples
+
+默认每数据集5物体。当前任务直接使用第三节的专用完整测试即可。

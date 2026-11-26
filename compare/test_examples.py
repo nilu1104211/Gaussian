@@ -23,10 +23,16 @@ FULL_TEST_COUNTS = {'pu1k': 127, 'pugan': 27}
 DEFAULT_RUN = ROOT / 'compare/retrain-runs/train-seed42-20261123-161953-503869'
 PRETRAINED_MODEL = 'PU-Gaussian-pretrained'
 REPKPU_PRETRAINED_MODEL = 'RepKPU-pretrained'
-PRETRAINED_MODELS = {PRETRAINED_MODEL: 'PU-Gaussian', REPKPU_PRETRAINED_MODEL: 'RepKPU'}
+PUCRN_PRETRAINED_MODEL = 'PU-CRN-pretrained'
+PRETRAINED_MODELS = {PRETRAINED_MODEL: 'PU-Gaussian', REPKPU_PRETRAINED_MODEL: 'RepKPU',
+                     PUCRN_PRETRAINED_MODEL: 'E0'}
 EXAMPLE_MODELS = (*DEFAULT_MODELS, *PRETRAINED_MODELS)
 PRETRAINED_ROOT = ROOT / 'compare/PU-Gaussian-main/pretrained_model'
 REPKPU_PRETRAINED_ROOT = ROOT / 'compare/RepKPU-main/pretrain'
+PUCRN_PRETRAINED_ROOT = ROOT / 'baseline/3DVision-main/PointUpsampling/PUCRN/model/release'
+PUCRN_CHECKPOINT = dict(filename='model.pth',
+    sha256='900070c91fd8d4e9c34191d17795e32fb37af0e284d5b4b0c4434dd7fe9870a6',
+    origin='https://github.com/hikvision-research/3DVision/blob/main/PointUpsampling/PUCRN/model/release/model.pth')
 # Pin the official current-model checkpoints before any evaluation. PU1K has
 # three released experiments; exp1 is fixed here, not chosen using our test CD.
 REPKPU_CHECKPOINTS = {
@@ -45,6 +51,15 @@ def official_checkpoint(args, model, dataset):
         return (checkpoint, sha256(checkpoint),
                 'https://github.com/mvg-inatech/PU-Gaussian/blob/main/pretrained_model/' + checkpoint.name,
                 'official-dataset-specific')
+    if model == PUCRN_PRETRAINED_MODEL:
+        root = getattr(args, 'pucrn_pretrained_root', PUCRN_PRETRAINED_ROOT)
+        checkpoint = root.expanduser().resolve() / PUCRN_CHECKPOINT['filename']
+        digest = sha256(checkpoint)
+        if digest != PUCRN_CHECKPOINT['sha256']:
+            raise ValueError(f'PU-CRN official checkpoint hash mismatch: {checkpoint}')
+        # One released checkpoint, not two dataset-specific training runs.
+        return (checkpoint, digest, PUCRN_CHECKPOINT['origin'],
+                f'official-shared-release-on-{dataset}-PU1K-reference')
     spec = REPKPU_CHECKPOINTS[dataset]
     root = getattr(args, 'repkpu_pretrained_root', REPKPU_PRETRAINED_ROOT)
     checkpoint = root.expanduser().resolve() / spec['filename']
@@ -153,6 +168,7 @@ def build_plan(args):
                 checkpoint_sha256=digest, best_epoch=None if pretrained else status['best_epoch'], config=config,
                 checkpoint_source='official-pretrained' if pretrained else 'retrained-best',
                 checkpoint_origin=origin, checkpoint_variant=variant,
+                checkpoint_format='net_state_dict' if model == PUCRN_PRETRAINED_MODEL else 'state_dict',
                 adapter_config_source=str(folder / 'config.json'),
                 training_manifest=None if pretrained else str(folder / 'manifest.json')))
     return dict(status='planned', training_run=str(training), prepared_root=str(prepared),
@@ -231,6 +247,18 @@ def run_child(arguments, log_path, env):
                 raise
 
 
+def inference_state_dict(checkpoint, checkpoint_format='state_dict'):
+    if checkpoint_format == 'net_state_dict':
+        if not isinstance(checkpoint, dict) or set(checkpoint) != {'net_state_dict'}:
+            raise ValueError('Expected the official PU-CRN net_state_dict checkpoint container')
+        checkpoint = checkpoint['net_state_dict']
+    elif checkpoint_format != 'state_dict':
+        raise ValueError(f'Unsupported inference checkpoint format: {checkpoint_format}')
+    if not isinstance(checkpoint, dict) or not checkpoint:
+        raise ValueError('Inference state_dict must be a nonempty mapping')
+    return checkpoint
+
+
 def infer_job(path):
     import numpy as np
     import torch
@@ -246,7 +274,9 @@ def infer_job(path):
     config = job['config']
     seed_all(config.get('model_seed', config['seed']))
     adapter = NativeAdapter(config)
-    adapter.net.load_state_dict(torch.load(job['checkpoint'], map_location='cuda', weights_only=True), strict=True)
+    checkpoint = torch.load(job['checkpoint'], map_location='cuda', weights_only=True)
+    state = inference_state_dict(checkpoint, job.get('checkpoint_format', 'state_dict'))
+    adapter.net.load_state_dict(state, strict=True)
     adapter.net.eval()
     results = []
     for index, name in enumerate(job['shapes'], 1):
@@ -337,7 +367,7 @@ def export_run(run_dir):
                 write_ply(ply, points)
                 display = label
                 if label in PRETRAINED_MODELS:
-                    display = PRETRAINED_MODELS[label] + '\nOfficial pretrained'
+                    display = label.removesuffix('-pretrained') + '\nOfficial pretrained'
                 elif label in ('PU-Gaussian', 'RepKPU'):
                     display = f'{label}\nRetrained (epoch {jobs[dataset, label]["best_epoch"]})'
                 clouds.append((display, points))
@@ -373,10 +403,13 @@ def export_run(run_dir):
         'Pairing means the same object, not point-by-point correspondence with GT.\n\n'
         'files.csv uses portable relative paths. run.json records shapes, seeds, data\n'
         'hashes, adapter config, weight sources and checkpoint hashes/epochs.\n'
-        'PU-Gaussian and RepKPU labels use our retrained best checkpoints. Labels\n'
+        'E0/E6, PU-Gaussian and RepKPU labels use our retrained checkpoints. Labels\n'
         'ending in -pretrained use official checkpoints, with original epoch\n'
         'unknown (null). RepKPU uses fixed PU1K exp1 and current PU-GAN releases;\n'
         'the separate PU-GAN paper-original architecture is not used here.\n'
+        'PU-CRN-pretrained uses the same official release model.pth on both test\n'
+        'datasets. Its supplied evaluation targets PU1K; it is not a separately\n'
+        'released PU-GAN checkpoint. The container has net_state_dict only.\n'
         'jobs/ contains inference logs/results; training manifests apply only to\n'
         'our retrained weights, not the official pretrained checkpoint.\n'
         'With --metrics, metrics/ contains diagnostic per-shape/mean CD, squared\n'
@@ -412,7 +445,8 @@ def export_metrics(run_dir, plan, rows):
         P2F_P99='per-shape P99 followed by equal-shape mean', display_scale=1000,
         evaluator_sha256=sha256(Path(__file__).with_name('evaluate_pugaussian_protocol.py')),
         checkpoints=[{key: job[key] for key in ('dataset', 'model', 'checkpoint_sha256',
-                    'checkpoint_source', 'checkpoint_origin', 'checkpoint_variant', 'best_epoch')} for job in plan['jobs']]))
+                    'checkpoint_source', 'checkpoint_origin', 'checkpoint_variant', 'checkpoint_format',
+                    'best_epoch')} for job in plan['jobs']]))
     for row in summary:
         print(f'{row["dataset"]}/{row["model"]}: CD={row["CD_x1000"]:.6f}, '
               f'HD={row["HD_x1000"]:.6f}, P2F={row["P2F_x1000"]:.6f} (x1000)', flush=True)
@@ -578,6 +612,8 @@ def parser():
                         help='Folder containing official pu_gaussian_{pu1k,pugan}_Best.pth')
     result.add_argument('--repkpu-pretrained-root', type=Path, default=REPKPU_PRETRAINED_ROOT,
                         help='Folder containing pinned official pu1k_exp1_best.pth and pugan_best.pth')
+    result.add_argument('--pucrn-pretrained-root', type=Path, default=PUCRN_PRETRAINED_ROOT,
+                        help='Folder containing the pinned shared official PU-CRN model.pth')
     result.add_argument('--num-examples', type=int, default=5, help='Fixed random sample size per dataset')
     result.add_argument('--shapes', nargs='+', help='Exact test shape stems (or .xyz names); overrides sample size')
     result.add_argument('--all-shapes', action='store_true', help='Use all 127 PU1K / 27 PU-GAN test objects; no sampling')
