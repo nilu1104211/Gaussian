@@ -1,4 +1,4 @@
-"""Run the four retrained models on matched examples in a new, portable folder.
+"""Run matched retrained/pretrained examples in a new, portable folder.
 
 The launcher uses only the standard library. Each native model runs in its own
 process, using NativeAdapter.infer exactly as the formal retraining test does.
@@ -20,6 +20,9 @@ from retrain_common import DEFAULT_MODELS, ROOT, read_json, sha256, stable_seed,
 
 DATASETS = {'pu1k': 'PU1K', 'pugan': 'PU-GAN'}
 DEFAULT_RUN = ROOT / 'compare/retrain-runs/train-seed42-20261123-161953-503869'
+PRETRAINED_MODEL = 'PU-Gaussian-pretrained'
+EXAMPLE_MODELS = (*DEFAULT_MODELS, PRETRAINED_MODEL)
+PRETRAINED_ROOT = ROOT / 'compare/PU-Gaussian-main/pretrained_model'
 
 
 def prepared_root(args):
@@ -75,14 +78,17 @@ def build_plan(args):
             selections[dataset].append(dict(shape=name, sources={k: str(p) for k, p in paths.items()},
                                            sha256={k: sha256(p) for k, p in paths.items()}))
         for model in args.models:
-            folder = training / dataset / model
+            pretrained = model == PRETRAINED_MODEL
+            native_model = 'PU-Gaussian' if pretrained else model
+            folder = training / dataset / native_model
             config = read_json(folder / 'config.json')
             status = read_json(folder / 'status.json')
-            if config['model'] != model or config['dataset'] != dataset or status['status'] != 'completed':
+            if config['model'] != native_model or config['dataset'] != dataset or status['status'] != 'completed':
                 raise ValueError(f'Model/config/status mismatch: {folder}')
-            checkpoint = folder / 'best.pth'
+            checkpoint = (args.pretrained_root.expanduser().resolve() / f'pu_gaussian_{dataset}_Best.pth'
+                          if pretrained else folder / 'best.pth')
             digest = sha256(checkpoint)
-            if digest != status['best_sha256']:
+            if not pretrained and digest != status['best_sha256']:
                 raise ValueError(f'Best checkpoint hash changed: {checkpoint}')
             protocol = read_json(folder / 'test/metrics/protocol.json')
             for sample in selections[dataset]:
@@ -92,11 +98,16 @@ def build_plan(args):
                     if sample['sha256'][key] != expected:
                         raise ValueError(f'{dataset}/{sample["shape"]}: {key} differs from {model} formal test data')
             jobs.append(dict(dataset=dataset, model=model, checkpoint=str(checkpoint),
-                checkpoint_sha256=digest, best_epoch=status['best_epoch'], config=config,
-                training_manifest=str(folder / 'manifest.json')))
+                checkpoint_sha256=digest, best_epoch=None if pretrained else status['best_epoch'], config=config,
+                checkpoint_source='official-pretrained' if pretrained else 'retrained-best',
+                checkpoint_origin=('https://github.com/mvg-inatech/PU-Gaussian/blob/main/pretrained_model/'
+                                   + checkpoint.name) if pretrained else str(folder / 'status.json'),
+                adapter_config_source=str(folder / 'config.json'),
+                training_manifest=None if pretrained else str(folder / 'manifest.json')))
     return dict(status='planned', training_run=str(training), prepared_root=str(prepared),
         seed=args.seed, models=args.models, selections=selections, jobs=jobs,
-        previews=not args.no_previews, archive=not args.no_archive,
+        previews=not args.no_previews, archive=not args.no_archive, metrics=args.metrics,
+        purpose='Diagnostic matched examples; official pretrained results are separate from formal retraining tables',
         inference='NativeAdapter.infer; same full 2048 -> 8192 path as formal test',
         coordinates='Original saved coordinates; no GT alignment or per-cloud rescaling',
         script_sha256=sha256(__file__), adapter_sha256=sha256(Path(__file__).with_name('retrain_adapters.py')))
@@ -127,7 +138,8 @@ def snapshot_inputs(run_dir, plan):
         job_path = run_dir / 'jobs' / f'{index:02d}_{job["dataset"]}_{job["model"]}.json'
         job['job_file'] = str(job_path.relative_to(run_dir))
         write_json(job_path, job)
-        shutil.copy2(job['training_manifest'], job_path.with_suffix('.training_manifest.json'))
+        if job['training_manifest']:
+            shutil.copy2(job['training_manifest'], job_path.with_suffix('.training_manifest.json'))
 
 
 def child_environment():
@@ -202,7 +214,9 @@ def infer_job(path):
         results.append(dict(shape=name, points=len(prediction), seconds=duration, sha256=sha256(destination)))
         print(f'{job["dataset"]}/{job["model"]} {index}/{len(job["shapes"])} {name}: {duration:.2f}s', flush=True)
     write_json(Path(path).with_suffix('.result.json'), dict(status='completed', results=results,
-        checkpoint_sha256=job['checkpoint_sha256'], torch=torch.__version__, gpu=torch.cuda.get_device_name(0)))
+        checkpoint_sha256=job['checkpoint_sha256'], checkpoint_source=job['checkpoint_source'],
+        best_epoch=job['best_epoch'], native_arguments=vars(adapter.args),
+        torch=torch.__version__, gpu=torch.cuda.get_device_name(0)))
 
 
 def write_ply(path, points):
@@ -249,11 +263,16 @@ def export_run(run_dir):
     from evaluate_pugaussian_protocol import read_points
 
     plan = read_json(run_dir / 'run.json')
-    rows = []
+    rows, metric_rows = [], []
+    jobs = {(job['dataset'], job['model']): job for job in plan['jobs']}
+    if plan.get('metrics'):
+        from evaluate_pugaussian_protocol import mesh_scene, p2f_scores, point_scores
     for dataset, samples in plan['selections'].items():
         for sample in samples:
             folder = run_dir / dataset / sample['shape']
             clouds = []
+            target = read_points(folder / 'gt_8192.xyz', 8192)
+            scene = mesh_scene(folder / 'gt_mesh.off') if plan.get('metrics') else None
             labels = [('Input', 'input_2048', 2048), ('GT', 'gt_8192', 8192)]
             labels += [(model, model, 8192) for model in plan['models']]
             for label, basename, count in labels:
@@ -261,10 +280,22 @@ def export_run(run_dir):
                 points = read_points(xyz, count)
                 ply = xyz.with_suffix('.ply')
                 write_ply(ply, points)
-                clouds.append((label, points))
+                display = label
+                if label == PRETRAINED_MODEL:
+                    display = 'PU-Gaussian\nOfficial pretrained'
+                elif label == 'PU-Gaussian':
+                    display = f'PU-Gaussian\nRetrained (epoch {jobs[dataset, label]["best_epoch"]})'
+                clouds.append((display, points))
                 rows.append(dict(dataset=dataset, shape=sample['shape'], label=label, points=count,
                     xyz=xyz.relative_to(run_dir).as_posix(), ply=ply.relative_to(run_dir).as_posix(),
                     xyz_sha256=sha256(xyz)))
+                if plan.get('metrics') and label in plan['models']:
+                    scores = point_scores(points, target)
+                    scores.update(p2f_scores(points, scene))
+                    job = jobs[dataset, label]
+                    metric_rows.append(dict(dataset=dataset, model=label, shape=sample['shape'],
+                        checkpoint_source=job['checkpoint_source'], best_epoch=job['best_epoch'],
+                        **{key + '_x1000': value * 1000 for key, value in scores.items()}))
             if plan['previews']:
                 render_comparison(folder / 'comparison.png', clouds, f'{DATASETS[dataset]} / {sample["shape"]}')
             print(f'Exported {dataset}/{sample["shape"]}', flush=True)
@@ -281,9 +312,47 @@ def export_run(run_dir):
         'No GT alignment, independent cloud normalization or display subsampling is applied.\n'
         'Pairing means the same object, not point-by-point correspondence with GT.\n\n'
         'files.csv uses portable relative paths. run.json records shapes, seeds, data\n'
-        'hashes, original training config and best checkpoint hashes/epochs.\n'
-        'jobs/ contains separate inference logs/results and training source manifests.\n'
+        'hashes, adapter config, weight sources and checkpoint hashes/epochs.\n'
+        'PU-Gaussian is the retrained best; PU-Gaussian-pretrained is the official\n'
+        'dataset-specific checkpoint. Its original epoch is unknown (null), not 105.\n'
+        'jobs/ contains inference logs/results; training manifests apply only to\n'
+        'our retrained weights, not the official pretrained checkpoint.\n'
+        'With --metrics, metrics/ contains diagnostic per-shape/mean CD, squared\n'
+        'HD and saved-coordinate P2F (display values x1000), using the same evaluator.\n'
+        'Example metrics are not full-dataset or formal retraining rankings.\n'
         'No checkpoints or training data H5 are included in this export.\n', encoding='utf-8')
+    if metric_rows:
+        export_metrics(run_dir, plan, metric_rows)
+
+
+def export_metrics(run_dir, plan, rows):
+    import numpy as np
+    from evaluate_pugaussian_protocol import write_csv
+
+    destination = run_dir / 'metrics'
+    destination.mkdir(exist_ok=False)
+    keys = [key for key in rows[0] if key.endswith('_x1000')]
+    summary = []
+    for dataset in plan['selections']:
+        for model in plan['models']:
+            selected = [row for row in rows if row['dataset'] == dataset and row['model'] == model]
+            summary.append(dict(dataset=dataset, model=model, n_shapes=len(selected),
+                checkpoint_source=selected[0]['checkpoint_source'], best_epoch=selected[0]['best_epoch'],
+                **{key: float(np.mean([row[key] for row in selected], dtype=np.float64)) for key in keys}))
+    write_csv(destination / 'per_shape.csv', rows)
+    write_csv(destination / 'summary.csv', summary)
+    write_json(destination / 'protocol.json', dict(status='completed', purpose=plan['purpose'],
+        n_shapes={dataset: len(samples) for dataset, samples in plan['selections'].items()},
+        normalization='prediction and GT independently centered / max-radius normalized in float32 for CD/HD',
+        CD='sum of bidirectional mean squared NN distances', HD='max of bidirectional maximum squared NN distances',
+        P2F='saved-coordinate mean unsigned Euclidean point-to-triangle distance',
+        P2F_P99='per-shape P99 followed by equal-shape mean', display_scale=1000,
+        evaluator_sha256=sha256(Path(__file__).with_name('evaluate_pugaussian_protocol.py')),
+        checkpoints=[{key: job[key] for key in ('dataset', 'model', 'checkpoint_sha256',
+                    'checkpoint_source', 'checkpoint_origin', 'best_epoch')} for job in plan['jobs']]))
+    for row in summary:
+        print(f'{row["dataset"]}/{row["model"]}: CD={row["CD_x1000"]:.6f}, '
+              f'HD={row["HD_x1000"]:.6f}, P2F={row["P2F_x1000"]:.6f} (x1000)', flush=True)
 
 
 def package_run(run_dir):
@@ -310,7 +379,10 @@ def execute(args):
         env = child_environment()
         for job in plan['jobs']:
             job_path = run_dir / job['job_file']
-            print(f'Starting {job["dataset"]}/{job["model"]}, best epoch {job["best_epoch"]}', flush=True)
+            checkpoint_info = ('official pretrained, original epoch unknown'
+                               if job['checkpoint_source'] == 'official-pretrained'
+                               else f'best epoch {job["best_epoch"]}')
+            print(f'Starting {job["dataset"]}/{job["model"]}, {checkpoint_info}', flush=True)
             run_child(['--worker-job', str(job_path)], job_path.with_suffix('.log'), env)
         run_child(['--export-run', str(run_dir)], run_dir / 'export.log', env)
         plan['status'] = 'completed'
@@ -331,7 +403,10 @@ def parser():
     result.add_argument('--training-run', type=Path, default=DEFAULT_RUN)
     result.add_argument('--prepared-root', type=Path, help='Prepared data root containing PU1K/ and PU-GAN/')
     result.add_argument('--datasets', choices=DATASETS, nargs='+', default=list(DATASETS))
-    result.add_argument('--models', choices=DEFAULT_MODELS, nargs='+', default=list(DEFAULT_MODELS))
+    result.add_argument('--models', choices=EXAMPLE_MODELS, nargs='+', default=list(DEFAULT_MODELS),
+                        help='PU-Gaussian is retrained; PU-Gaussian-pretrained uses official weights')
+    result.add_argument('--pretrained-root', type=Path, default=PRETRAINED_ROOT,
+                        help='Folder containing official pu_gaussian_{pu1k,pugan}_Best.pth')
     result.add_argument('--num-examples', type=int, default=5, help='Fixed random sample size per dataset')
     result.add_argument('--shapes', nargs='+', help='Exact test shape stems (or .xyz names); overrides sample size')
     result.add_argument('--seed', type=int, default=42, help='Example selection and per-shape inference seed')
@@ -339,6 +414,7 @@ def parser():
     result.add_argument('--tag', default='examples', help='Run label: ASCII letters, digits, hyphen, underscore')
     result.add_argument('--no-previews', action='store_true')
     result.add_argument('--no-archive', action='store_true')
+    result.add_argument('--metrics', action='store_true', help='Also compute diagnostic CD/HD/P2F on the chosen examples')
     modes = result.add_mutually_exclusive_group()
     modes.add_argument('--plan', action='store_true', help='Validate files/hashes and print plan without inference/writes')
     modes.add_argument('--list-shapes', action='store_true', help='List available paired test shapes without loading models')

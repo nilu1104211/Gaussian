@@ -1,9 +1,10 @@
-四网络点云样例测试（2026-11-26）
+点云样例测试与PU-Gaussian官方权重对照（2026-11-26）
 
 入口：compare/test_examples.py
 在已有 scdata-v3 服务器环境运行，只做推断，不训练。
 默认使用本轮正式重训目录中，各数据集的 E0/E6/RepKPU/PU-Gaussian best.pth。
 Grad-PU 不在此入口中。
+默认仍只跑本轮重训的四网络；官方PU-Gaussian权重通过额外模型名显式选择。
 
 一、本机通过 Git 上传，服务器拉取
 
@@ -43,6 +44,58 @@ EXAMPLE TEST COMPLETED: /home/zk/Gaussian/compare/test-runs/test-实际时间-ex
 使用 NativeAdapter.infer，与正式测试的完整推断路径相同。
 自动沿用 compare/.pugaussian-runtime/python 的附加运行依赖，不执行依赖安装。
 
+二点一、PU-Gaussian官方预训练权重与本轮重训权重并排测试
+
+仓库已有两份、并且已被Git跟踪的预训练权重：
+compare/PU-Gaussian-main/pretrained_model/pu_gaussian_pu1k_Best.pth
+compare/PU-Gaussian-main/pretrained_model/pu_gaussian_pugan_Best.pth
+
+本机检查：两份权重都能作为state_dict读取；各有107个张量，键名及形状与对应重训网络一致。
+这只是结构兼容检查，实际原生CUDA推断仍需在服务器环境运行。
+
+建议先执行以下对照，在服务器上运行（先按第一节上传代码、git pull）：
+
+cd /home/zk/Gaussian
+conda activate scdata-v3
+python -u compare/test_examples.py --models PU-Gaussian PU-Gaussian-pretrained --metrics --tag gaussian-pretrained
+
+默认每数据集仍为5个物体、seed42，与上一次默认样例选择一致。
+每个物体同时保存输入、GT、本轮重训PU-Gaussian和官方预训练PU-Gaussian，使用同一推断路径及逐物体种子。
+PU1K自动使用pu_gaussian_pu1k_Best.pth，PU-GAN自动使用pu_gaussian_pugan_Best.pth，不混用。
+
+输出位置示例：
+compare/test-runs/test-时间戳-gaussian-pretrained/
+  pu1k/物体名/PU-Gaussian.xyz / .ply             # 本轮重训，best=105
+  pu1k/物体名/PU-Gaussian-pretrained.xyz / .ply  # 官方预训练，原始轮次未知
+  pugan/物体名/                               # 同样结构
+  metrics/per_shape.csv
+  metrics/summary.csv
+  metrics/protocol.json
+
+预览图会明确区分Official pretrained和Retrained。
+官方权重文件名中的Best不代表本项目第105轮；run.json中其best_epoch=null，指标CSV中为空。
+不将本项目训练manifest冒充为官方权重的训练来源；文件哈希、来源URL和本次推断参数分别记录。
+
+--metrics 使用当前统一评测函数，输出CD、平方HD、两个方向HD、P2F和P2F_P99，显示值均为原值乘1000。
+summary.csv为所选样例的逐物体等权均值，不是127/27个物体的全测试集主表。
+这次是同一适配推断路径下的权重来源对照；尚不等于已独立跑完未经适配的官方test.py工具链。
+官方预训练与本项目独立划分重训的训练数据协议不同，结果用于诊断，单独报告。
+
+# 只测官方预训练权重
+python -u compare/test_examples.py --models PU-Gaussian-pretrained --metrics --tag official-only
+
+# 只在PU1K上比较两种权重，仍使用固定的5个默认样例
+python -u compare/test_examples.py --datasets pu1k --models PU-Gaussian PU-Gaussian-pretrained --metrics --tag gaussian-pu1k
+
+# 与原来四网络一起显示，增加第五个输出
+python -u compare/test_examples.py --models E0 E6 RepKPU PU-Gaussian PU-Gaussian-pretrained --metrics --tag five-models
+
+# 只打印对照计划，检查数据/权重路径和哈希，不加载模型、不创建结果目录
+python compare/test_examples.py --models PU-Gaussian PU-Gaussian-pretrained --metrics --plan
+
+若权重单独存放，可加 --pretrained-root /实际权重文件夹；目录内需保留上述两个数据集对应文件名。
+当前入口使用正式运行的PU-Gaussian配置与protocol作为推断/数据参照，因此仍需要保留该模型的config、status、protocol等归档。
+
 三、按需选少量样例
 
 # 先只跑 PU1K，3个物体
@@ -69,6 +122,7 @@ python compare/test_examples.py --datasets pu1k --num-examples 3 --plan
 --num-examples 表示每个数据集的数量；--shapes 会覆盖随机抽样数量。
 同时选两个数据集并指定 --shapes 时，对象名必须在两者中都存在。
 --no-previews 跳过PNG；--no-archive 跳过自动压缩；XYZ和PLY始终导出。
+--metrics 可选增加样例指标，不改变默认四网络选择或正式评测脚本。
 --output-root 可以指定其他测试总目录；每次仍自动创建新的时间戳子目录。
 
 四、输出结构
@@ -79,6 +133,7 @@ compare/test-runs/
     README.txt
     files.csv                      # 数据集、物体、标签、点数、XYZ/PLY相对路径和XYZ哈希
     export.log
+    metrics/                       # 仅--metrics时生成，样例指标与协议
     jobs/                          # 每个模型的独立任务、日志、结果与训练源码manifest
     pu1k/对象名/
       input_2048.xyz / .ply         # 真实输入，2048点

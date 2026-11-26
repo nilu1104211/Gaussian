@@ -175,3 +175,130 @@ def test_failed_worker_preserves_failed_run_without_success_archive(options, mon
     assert read_json(run / 'run.json')['status'] == 'failed'
     assert list(run.glob('pu1k/*/input_2048.xyz'))
     assert not list(options.output_root.glob('*.tar.gz'))
+
+
+def gaussian_fixture(options):
+    import shutil
+    folder = options.training_run / 'pu1k/PU-Gaussian'
+    shutil.copytree(options.training_run / 'pu1k/E0', folder)
+    write_json(folder / 'config.json', dict(dataset='pu1k', model='PU-Gaussian', seed=42))
+    (folder / 'best.pth').write_bytes(b'retrained-gaussian')
+    write_json(folder / 'status.json', dict(status='completed', best_epoch=105,
+                                           best_sha256=sha256(folder / 'best.pth')))
+    options.pretrained_root = options.training_run.parent / 'official-weights'
+    options.pretrained_root.mkdir()
+    for dataset in ('pu1k', 'pugan'):
+        (options.pretrained_root / f'pu_gaussian_{dataset}_Best.pth').write_bytes(b'official-' + dataset.encode())
+    return folder
+
+
+def test_official_weights_use_dataset_specific_files_without_false_training_provenance(options):
+    import shutil
+    original_selection = examples.build_plan(options)['selections']['pu1k']
+    folder = gaussian_fixture(options)
+    second = options.training_run / 'pugan/PU-Gaussian'
+    shutil.copytree(folder, second)
+    write_json(second / 'config.json', dict(dataset='pugan', model='PU-Gaussian', seed=42))
+    shutil.copytree(options.prepared_root / 'PU1K', options.prepared_root / 'PU-GAN')
+    options.datasets = ['pu1k', 'pugan']
+    options.models = ['PU-Gaussian', examples.PRETRAINED_MODEL]
+    plan = examples.build_plan(options)
+    assert plan['selections']['pu1k'] == original_selection
+    assert len(plan['jobs']) == 4
+    run = examples.new_run_directory(options.output_root, 'pretrained')
+    examples.snapshot_inputs(run, plan)
+    for job in plan['jobs']:
+        assert job['config']['model'] == 'PU-Gaussian'
+        copied_manifest = (run / job['job_file']).with_suffix('.training_manifest.json')
+        if job['model'] == examples.PRETRAINED_MODEL:
+            assert Path(job['checkpoint']).name == f'pu_gaussian_{job["dataset"]}_Best.pth'
+            assert job['checkpoint_sha256'] == sha256(job['checkpoint'])
+            assert job['best_epoch'] is None
+            assert job['checkpoint_source'] == 'official-pretrained'
+            assert job['training_manifest'] is None and not copied_manifest.exists()
+            assert 'pretrained_model/' in job['checkpoint_origin']
+        else:
+            assert Path(job['checkpoint']).name == 'best.pth'
+            assert job['best_epoch'] == 105
+            assert job['checkpoint_source'] == 'retrained-best' and copied_manifest.exists()
+
+
+def test_official_only_needs_its_own_weights_and_missing_weights_fail_before_writes(options):
+    folder = gaussian_fixture(options)
+    options.models = [examples.PRETRAINED_MODEL]
+    # A missing retrained weight must not be silently loaded or required in official-only mode.
+    (folder / 'best.pth').unlink()
+    plan = examples.build_plan(options)
+    assert plan['jobs'][0]['checkpoint_source'] == 'official-pretrained'
+    Path(plan['jobs'][0]['checkpoint']).unlink()
+    with pytest.raises(FileNotFoundError):
+        examples.execute(options)
+    assert not options.output_root.exists()
+
+
+def test_pretrained_comparison_exports_both_sources_and_original_coordinate_metrics(options, monkeypatch):
+    import evaluate_pugaussian_protocol as metrics
+    folder = gaussian_fixture(options)
+    options.models = ['PU-Gaussian', examples.PRETRAINED_MODEL]
+    options.shapes = ['shape.a', 'shape.b']
+    options.metrics = True
+    source = options.prepared_root / 'PU1K/test'
+    protocol = read_json(folder / 'test/metrics/protocol.json')
+    # All GT points are inside the fixture triangle, so vertical offsets have known P2F.
+    for index, name in enumerate(('shape.a', 'shape.b', 'shape.c')):
+        points = np.random.default_rng(index).uniform(.05, .4, size=(8192, 3)).astype(np.float32)
+        points[:, 2] = 0
+        for group, subfolder, data in [('inputs', 'input_2048', points[:2048]), ('gt', 'gt_8192', points)]:
+            path = source / subfolder / f'{name}.xyz'
+            np.savetxt(path, data, fmt='%.10g')
+            protocol['source_hashes'][group][path.name] = sha256(path)
+    write_json(folder / 'test/metrics/protocol.json', protocol)
+
+    def plane_scene(path):
+        assert path.read_text() == 'OFF\n3 1 0\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n'
+        return 'fixture-triangle'
+
+    def analytic_plane_p2f(points, scene):
+        # Only the optional Open3D dependency is substituted; use an exact analytic oracle.
+        assert scene == 'fixture-triangle'
+        assert (points[:, :2] >= 0).all() and (points[:, :2].sum(1) <= 1).all()
+        distances = np.abs(points[:, 2]).astype(np.float64)
+        return dict(P2F=float(distances.mean()), P2F_P99=float(np.percentile(distances, 99)))
+
+    def child(arguments, log_path, env):
+        log_path.write_text('CPU fixture worker\n')
+        if arguments[0] == '--export-run':
+            examples.export_run(Path(arguments[1]))
+            return
+        job = read_json(arguments[1])
+        offset = .25 if job['checkpoint_source'] == 'official-pretrained' else .125
+        for shape in job['shapes']:
+            case = Path(job['run_dir']) / job['dataset'] / shape
+            points = np.loadtxt(case / 'gt_8192.xyz', dtype=np.float32)
+            points[:, 2] += offset
+            np.savetxt(case / f'{job["model"]}.xyz', points, fmt='%.10g')
+
+    monkeypatch.setattr(metrics, 'mesh_scene', plane_scene)
+    monkeypatch.setattr(metrics, 'p2f_scores', analytic_plane_p2f)
+    monkeypatch.setattr(examples, 'run_child', child)
+    examples.execute(options)
+    run, = (path for path in options.output_root.iterdir() if path.is_dir())
+    with (run / 'metrics/summary.csv').open(encoding='utf-8-sig') as stream:
+        summary = {row['model']: row for row in csv.DictReader(stream)}
+    assert set(summary) == set(options.models)
+    assert summary['PU-Gaussian']['best_epoch'] == '105'
+    assert summary[examples.PRETRAINED_MODEL]['best_epoch'] == ''
+    assert float(summary['PU-Gaussian']['P2F_x1000']) == pytest.approx(125.)
+    assert float(summary[examples.PRETRAINED_MODEL]['P2F_x1000']) == pytest.approx(250.)
+    assert all(float(row['CD_x1000']) < 2e-6 for row in summary.values())
+    assert all(row['n_shapes'] == '2' for row in summary.values())
+    metadata = read_json(run / 'metrics/protocol.json')
+    assert metadata['display_scale'] == 1000
+    assert metadata['checkpoints'][1]['best_epoch'] is None
+    for name in options.shapes:
+        case = run / 'pu1k' / name
+        assert (case / 'PU-Gaussian.ply').is_file()
+        assert (case / 'PU-Gaussian-pretrained.ply').is_file()
+        assert sha256(case / 'PU-Gaussian.xyz') != sha256(case / 'PU-Gaussian-pretrained.xyz')
+    with tarfile.open(run.with_suffix('.tar.gz')) as archive:
+        assert all(not name.endswith('.pth') for name in archive.getnames())
