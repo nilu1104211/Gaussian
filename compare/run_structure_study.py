@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import run_retraining as native
+from evaluate_pugaussian_protocol import HD_CONVENTION
 from retrain_common import NEW_PUGCS_MODELS, ROOT, read_json, sha256, source_hashes, write_json
 
 RUNS = ROOT / 'compare/retrain-runs'
@@ -96,9 +97,11 @@ def load_baseline(settings, data_sha):
                     raise ValueError('E6 stage baseline is not the matching full validation run')
                 row = next(r for r in read_csv(summary_path) if r['phase'] == 'fps' and r['stage'] == 'p3')
                 metrics = {key: float(row[key + '_x1000']) / 1000 for key in METRICS}
+                # Archived max-HD reports already retain both directed maxima.
+                metrics['HD'] = metrics['HD_pred_to_gt'] + metrics['HD_gt_to_pred']
                 if not all(math.isfinite(value) and value >= 0 for value in metrics.values()):
                     raise ValueError('Nonfinite E6 baseline')
-                result[dataset] = dict(metrics=metrics, n_shapes=COUNTS[dataset], epoch=None,
+                result[dataset] = dict(metrics=metrics, HD_convention=HD_CONVENTION, n_shapes=COUNTS[dataset], epoch=None,
                     reference_budget=100, budget_matched=settings.get('epochs', 100) == 100,
                     best_sha256=protocol['best_sha256'], source=str(summary_path),
                     evidence_sha256={str(path): sha256(path) for path in (protocol_path, summary_path)})
@@ -125,10 +128,11 @@ def history_baseline(settings, data_sha, budget):
             raise ValueError('E6 history does not cover the requested budget')
         row = min(candidates, key=lambda r: float(r['CD']))
         metrics = {key: float(row[key]) for key in METRICS}
+        metrics['HD'] = metrics['HD_pred_to_gt'] + metrics['HD_gt_to_pred']
         if not all(math.isfinite(value) and value >= 0 for value in metrics.values()):
             raise ValueError('Nonfinite E6 archive')
         epoch = int(row['epoch'])
-        result[dataset] = dict(metrics=metrics, n_shapes=COUNTS[dataset], epoch=epoch,
+        result[dataset] = dict(metrics=metrics, HD_convention=HD_CONVENTION, n_shapes=COUNTS[dataset], epoch=epoch,
             reference_budget=budget, budget_matched=settings.get('epochs', 100) == budget,
             best_sha256=status['best_sha256'] if epoch == status['best_epoch'] else None,
             full_run_best_sha256=status['best_sha256'], source=str(folder / 'validation.csv'),
@@ -188,9 +192,11 @@ def model_result(folder, dataset, model):
             raise ValueError(f'Checkpoint changed or missing: {job / name}')
     row = next(r for r in read_csv(job / 'validation.csv') if int(r['epoch']) == status['best_epoch'])
     metrics = {key: float(row[key]) for key in METRICS}
+    metrics['HD'] = metrics['HD_pred_to_gt'] + metrics['HD_gt_to_pred']
     if not all(math.isfinite(value) and value >= 0 for value in metrics.values()):
         raise ValueError(f'Nonfinite validation metrics: {job}')
-    return dict(epoch=status['best_epoch'], metrics=metrics, job=str(job), best_sha256=status['best_sha256'])
+    return dict(epoch=status['best_epoch'], metrics=metrics, HD_convention=HD_CONVENTION,
+                job=str(job), best_sha256=status['best_sha256'])
 
 
 def verify_native(folder, args, fingerprint):
@@ -273,6 +279,7 @@ def summarize(folder, queue):
     for dataset in settings['datasets']:
         reference = baseline[dataset]
         rows.append(dict(dataset=dataset, model='E6', best_epoch=reference['epoch'],
+            HD_convention=HD_CONVENTION,
             training_epochs=reference.get('reference_budget', 100), comparison_budget_matched=reference.get('budget_matched', True),
             n_shapes=COUNTS[dataset], **{k + '_x1000': reference['metrics'][k] * 1000 for k in METRICS},
             CD_change_vs_E6_percent=0., source=reference['source']))
@@ -284,6 +291,7 @@ def summarize(folder, queue):
             result = model_result(folder / group, dataset, model)
             reference_cd = reference['metrics']['CD']
             rows.append(dict(dataset=dataset, model=model, best_epoch=result['epoch'], n_shapes=COUNTS[dataset],
+                HD_convention=HD_CONVENTION,
                 training_epochs=settings.get('epochs', 100), comparison_budget_matched=reference.get('budget_matched', True),
                 **{key + '_x1000': result['metrics'][key] * 1000 for key in METRICS},
                 CD_change_vs_E6_percent=100 * (result['metrics']['CD'] / reference_cd - 1) if reference_cd else None,

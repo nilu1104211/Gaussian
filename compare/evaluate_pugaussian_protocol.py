@@ -1,7 +1,7 @@
 """One CD/HD/P2F implementation for both datasets and held-out validation.
 
 CD: independently normalized bidirectional mean squared NN distance sum.
-HD: independently normalized max of the directed maximum squared distances.
+HD: independently normalized sum of the two directed maximum squared distances.
 P2F: unsigned Euclidean point-to-triangle distance in SAVED coordinates.
 This is an explicit public-code-based protocol, not a historical CGAL equivalence claim.
 """
@@ -15,6 +15,8 @@ from retrain_common import sha256, write_json
 
 EXPECTED = {'PU1K': 127, 'PU-GAN': 27}
 SCALE = 1000.0
+HD_CONVENTION = 'bidirectional_max_squared_sum_v1'
+HD_DEFINITION = 'sum of bidirectional maximum squared NN distances'
 
 
 def read_points(path, count):
@@ -38,7 +40,7 @@ def point_scores(pred, gt):
     forward = ((pred - gt[cKDTree(gt).query(pred, k=1)[1]]) ** 2).sum(-1)
     backward = ((gt - pred[cKDTree(pred).query(gt, k=1)[1]]) ** 2).sum(-1)
     return dict(CD=float(forward.mean() + backward.mean()),
-                HD=float(max(forward.max(), backward.max())),
+                HD=float(forward.max() + backward.max()),
                 HD_pred_to_gt=float(forward.max()), HD_gt_to_pred=float(backward.max()))
 
 
@@ -121,7 +123,7 @@ def run(args):
             common[key] = {name + suffix: sha256(Path(folder) / (name + suffix)) for name in sorted(cloud_names(args.gt_dir))}
         write_json(args.output_dir / 'protocol.json', dict(status='completed', dataset=args.dataset,
             expected_shapes=expected, normalization='independent centroid/max radius in float32',
-            CD='bidirectional mean squared NN sum', HD='maximum squared NN over both directions',
+            CD='bidirectional mean squared NN sum', HD=HD_DEFINITION, HD_convention=HD_CONVENTION,
             P2F='saved-coordinate unsigned Euclidean point-to-triangle mean', scale_factor=SCALE,
             numpy=np.__version__, scipy=scipy.__version__, open3d=o3d.__version__,
             script_sha256=sha256(__file__), common_sha256=sha256(Path(__file__).with_name('retrain_common.py')),

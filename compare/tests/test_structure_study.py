@@ -115,6 +115,17 @@ def test_complete_queue_and_idempotent_resume(queue_env):
     assert len(env.calls) == 3 and len(env.diag_calls) == 10
 
 
+def test_archived_baseline_hd_uses_sum_without_rewriting_originals(queue_env):
+    env = queue_env
+    baseline_dir = Path(env.settings['baseline_stages'])
+    hashes = {path: sha256(path) for path in baseline_dir.rglob('*') if path.is_file()}
+    result = study.load_baseline(env.settings, sha256(Path(env.settings['prepared_root']) / 'manifest.json'))
+    for row in result.values():
+        assert row['metrics']['HD'] == pytest.approx(.006)
+        assert row['HD_convention'] == 'bidirectional_max_squared_sum_v1'
+    assert {path: sha256(path) for path in hashes} == hashes
+
+
 def test_missing_global_smoke_certificate_is_recovered_without_retraining_components(queue_env):
     env = queue_env
     run(env)

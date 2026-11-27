@@ -465,6 +465,8 @@ def test_pretrained_comparison_exports_both_sources_and_original_coordinate_metr
     assert all(row['n_shapes'] == '2' for row in summary.values())
     metadata = read_json(run / 'metrics/protocol.json')
     assert metadata['display_scale'] == 1000
+    assert metadata['HD_convention'] == 'bidirectional_max_squared_sum_v1'
+    assert metadata['HD'] == 'sum of bidirectional maximum squared NN distances'
     assert metadata['checkpoints'][1]['best_epoch'] is None
     for name in options.shapes:
         case = run / 'pu1k' / name

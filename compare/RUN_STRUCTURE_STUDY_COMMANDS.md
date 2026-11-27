@@ -2,6 +2,8 @@
 
 入口：`compare/run_structure_study.py`。本文件描述代码行为，不代表新结构已经正式训练或取得收益。
 
+2026-11-27起HD统一使用两个方向最大平方距离之和，显示乘1000。读取旧E6验证参考时，程序根据已保存的两个方向最大值重建相加HD，不改写旧文件；新对照表记录`HD_convention=bidirectional_max_squared_sum_v1`。上传与已保存预测重评命令见`compare/HD_SUM_COMMANDS.txt`。
+
 ## 一次启动的流程
 
 1. 自动对选定版本和数据集运行3轮原生 smoke，检查梯度、参数更新和验证后继续训练。

@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from evaluate_pugaussian_protocol import cd_hd_squared, evaluate, run
+from evaluate_pugaussian_protocol import cd_hd_squared, evaluate, point_scores, run
 from prepare_retraining_data import check_split_identity, clean_test_overlap, make_patches, mesh_split
 from retrain_common import ROOT, stable_seed
 from run_retraining import job_config, profile
@@ -45,17 +45,31 @@ def test_metric_semantics_and_raw_mesh_coordinates(tmp_path):
     with pytest.raises(FileExistsError):
         run(SimpleNamespace(output_dir=output))
     assert (output / 'existing.csv').read_text() == 'keep'
+    exported = tmp_path / 'sum-metrics'
+    run(SimpleNamespace(output_dir=exported, dataset='PU1K', expected_shapes=1,
+        prediction=[('fixture', tmp_path / 'pred')], input_dir=tmp_path / 'input',
+        gt_dir=tmp_path / 'gt', mesh_dir=tmp_path / 'mesh'))
+    from retrain_common import read_json
+    metadata = read_json(exported / 'protocol.json')
+    assert metadata['HD_convention'] == 'bidirectional_max_squared_sum_v1'
+    assert metadata['HD'] == 'sum of bidirectional maximum squared NN distances'
+    assert metadata['scale_factor'] == 1000
 
 
 def test_cd_hd_against_exhaustive_distances():
     from evaluate_pugaussian_protocol import independent_unit_sphere
-    p = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, .4]], dtype=np.float32)
-    q = np.array([[0, 0, 0], [.8, 0, 0], [0, 1, 0], [.2, .2, .5]], dtype=np.float32)
+    # Different point counts and unequal directed maxima also rule out 2*max.
+    p = np.array([[-1, 0, 0], [1, 0, 0], [0, 1, 0], [0, -1, 0]], dtype=np.float32)
+    q = np.array([[-1, 0, 0], [1, 0, 0], [0, .6, 0], [0, -.6, 0], [0, 0, 0]], dtype=np.float32)
     d = ((independent_unit_sphere(p)[:, None] - independent_unit_sphere(q)[None]) ** 2).sum(-1)
     cd, hd = cd_hd_squared(p, q)
     assert cd == pytest.approx(float(d.min(1).mean() + d.min(0).mean()))
-    assert hd == pytest.approx(float(max(d.min(1).max(), d.min(0).max())))
-    assert hd != pytest.approx(float(d.min(1).max() + d.min(0).max()))
+    assert hd == pytest.approx(float(d.min(1).max() + d.min(0).max()))
+    assert hd != pytest.approx(float(max(d.min(1).max(), d.min(0).max())))
+    assert hd != pytest.approx(float(2 * max(d.min(1).max(), d.min(0).max())))
+    scores = point_scores(p, q)
+    assert hd == pytest.approx(scores['HD_pred_to_gt'] + scores['HD_gt_to_pred'])
+    assert cd_hd_squared(p[::-1], q[[2, 0, 4, 3, 1]]) == pytest.approx((cd, hd))
     assert cd_hd_squared(p, p[::-1]) == (0, 0)
 
 

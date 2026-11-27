@@ -90,6 +90,7 @@ compare/test-runs/test-时间戳-gaussian-pretrained/
 不将本项目训练manifest冒充为官方权重的训练来源；文件哈希、来源URL和本次推断参数分别记录。
 
 --metrics 使用当前统一评测函数，输出CD、平方HD、两个方向HD、P2F和P2F_P99，显示值均为原值乘1000。
+2026-11-27起HD为两个方向最大平方距离之和；protocol.json标记bidirectional_max_squared_sum_v1，旧max结果不会自动更新。
 summary.csv为所选样例的逐物体等权均值，不是127/27个物体的全测试集主表。
 这次是同一适配推断路径下的权重来源对照；尚不等于已独立跑完未经适配的官方test.py工具链。
 官方预训练与本项目独立划分重训的训练数据协议不同，结果用于诊断，单独报告。

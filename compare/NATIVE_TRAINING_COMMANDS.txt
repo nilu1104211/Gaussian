@@ -21,6 +21,8 @@
 - 所有网络共用127个PU1K测试输入/GT/mesh和27个PU-GAN测试输入/GT/mesh。PU1K测试点不改；PU-GAN优先复用旧固定测试，否则从官方test mesh固定生成一次。
 - 日志默认每100步和每轮首末记录，epoch均值完整保存，减少training.jsonl占用。
 - 新输出在compare/native-runs；旧结果保留在原目录，新旧协议分表报告。
+- 2026-11-27起统一HD为两个方向最大平方近邻距离之和，乘1000显示；protocol.json标记bidirectional_max_squared_sum_v1。
+  CD和P2F定义不变。旧max指标需用已保存XYZ重评，具体命令见compare/HD_SUM_COMMANDS.txt。
   新入口不接旧实验last.pth。旧结构实验若需续训，应使用它记录的原始源码版本，保留源码指纹检查。
 
 注：本轮沿用发布的训练池。原始PU1K mesh池已知存在一份与测试mesh内容相同的条目；builder把可核实的原始mesh池重合写入manifest的publisher_pool_audit。

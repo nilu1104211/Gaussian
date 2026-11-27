@@ -18,6 +18,8 @@ baseline/3DVision-main/PointUpsampling/PUCRN/model/release/model.pth
 SHA256：900070c91fd8d4e9c34191d17795e32fb37af0e284d5b4b0c4434dd7fe9870a6
 
 目前核对到的是一份release，而非分别用于PU1K/PU-GAN的两份专用权重。
+这不表示作者只训练过一个数据集。论文第4.1节分别描述PU1K和PU-GAN训练，
+均为100轮，batch size分别为64和32；公开文件数量与论文训练实验数量需区分。
 官方附带的test.sh和evaluation.csv针对PU1K；权重本身只含net_state_dict。
 本次用同一份文件测试两个数据集，PU-GAN属于该release在PU-GAN上的额外评估。
 不会把它记为专门的官方PU-GAN训练权重，也不从文件名推断原始best轮次。
@@ -101,12 +103,12 @@ compare/test-runs/test-时间戳-pucrn-pretrained-full/
 结束标志FULL TEST COMPLETED，下载打印的Download archive路径，解压到本机compare/test-runs/。
 图像默认不逐物体绘制；回传后可把本次结果加入现有输入/GT及各网络总览。
 
-指标与前面各次完全一致，显示值均×1000，按物体等权平均：
+当前统一指标（2026-11-27切换HD为方向求和），显示值均×1000，按物体等权平均：
 CD：预测与GT各自质心/最大半径归一化后的双向最近邻平方距离均值之和。
-HD：相同归一化后，两个方向最大平方距离取max；同时保留两个方向的值。
+HD：相同归一化后，两个方向最大平方距离相加；同时保留两个方向的值。
 P2F：保存坐标下到GT连续三角网格的无符号欧氏距离均值。
 P2F_P99：逐物体P99再等权平均。
-当前HD与旧工具方向求和口径需区分；不直接混比旧论文HD。
+HD协议标记为bidirectional_max_squared_sum_v1；此前max结果须重评后比较，不据此宣称严格复现旧论文的全部工具链。
 
 官方release测试结果单独报告，训练协议与本项目重训不同，不替换原E0/E6主表。
 本次使用已适配的完整E0推断路径，不宣称独立跑完未经适配的所有原生工具链。

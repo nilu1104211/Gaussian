@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import numpy as np
 from scipy.spatial import cKDTree
 
-from evaluate_pugaussian_protocol import (cloud_names, independent_unit_sphere,
+from evaluate_pugaussian_protocol import (HD_CONVENTION, HD_DEFINITION, cloud_names, independent_unit_sphere,
     mesh_scene, p2f_scores, read_points, write_csv)
 from retrain_common import ROOT, PUGCS_MODELS, read_json, sha256, source_hashes, write_json, pugcs_variant_options
 
@@ -22,7 +22,7 @@ def directional_scores(pred, gt):
     forward = ((pred - gt[cKDTree(gt).query(pred)[1]]) ** 2).sum(-1)
     backward = ((gt - pred[cKDTree(pred).query(gt)[1]]) ** 2).sum(-1)
     return dict(CD=float(forward.mean() + backward.mean()),
-                HD=float(max(forward.max(), backward.max())),
+                HD=float(forward.max() + backward.max()),
                 mean_pred_to_gt=float(forward.mean()), mean_gt_to_pred=float(backward.mean()),
                 HD_pred_to_gt=float(forward.max()), HD_gt_to_pred=float(backward.max()))
 
@@ -186,6 +186,7 @@ def audit(args):
             total_inference_and_metrics_seconds=time.monotonic() - started,
             p1_note='P1=4096, P2/P3=8192 after FPS; P1 is not an equal-count comparison',
             metric_note='formal: independent unit spheres; shared_*: input center/radius; P2F: raw coordinates; x1000 columns only',
+            HD=HD_DEFINITION, HD_convention=HD_CONVENTION,
             movement_note='P2/P3 paired before FPS; local parent frame and scale, absolute normal component; object-equal means',
             data_manifest_sha256=sha256(args.prepared_root / 'manifest.json'),
             hashes=hashes, sources=source_hashes()))

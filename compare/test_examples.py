@@ -432,7 +432,7 @@ def export_run(run_dir):
 
 def export_metrics(run_dir, plan, rows):
     import numpy as np
-    from evaluate_pugaussian_protocol import write_csv
+    from evaluate_pugaussian_protocol import HD_CONVENTION, HD_DEFINITION, write_csv
 
     destination = run_dir / 'metrics'
     destination.mkdir(exist_ok=False)
@@ -450,7 +450,7 @@ def export_metrics(run_dir, plan, rows):
         test_scope=plan.get('test_scope', 'selected-examples'),
         n_shapes={dataset: len(samples) for dataset, samples in plan['selections'].items()},
         normalization='prediction and GT independently centered / max-radius normalized in float32 for CD/HD',
-        CD='sum of bidirectional mean squared NN distances', HD='max of bidirectional maximum squared NN distances',
+        CD='sum of bidirectional mean squared NN distances', HD=HD_DEFINITION, HD_convention=HD_CONVENTION,
         P2F='saved-coordinate mean unsigned Euclidean point-to-triangle distance',
         P2F_P99='per-shape P99 followed by equal-shape mean', display_scale=1000,
         evaluator_sha256=sha256(Path(__file__).with_name('evaluate_pugaussian_protocol.py')),

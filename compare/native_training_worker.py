@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from evaluate_pugaussian_protocol import evaluate, write_csv
+from evaluate_pugaussian_protocol import HD_CONVENTION, HD_DEFINITION, evaluate, write_csv
 from retrain_common import read_json, sha256, stable_seed, write_json
 from retrain_worker import isolated_rng, rng_state, restore_rng, save_torch, seed_all, infer_directory
 from native_training_protocol import runtime_sources
@@ -181,7 +181,8 @@ def run(config, resume=False):
                 **{k+'_x1000': v*1000 for k, v in summary.items()})])
             write_json(metrics_dir/'protocol.json', dict(config=config,
                 CD='independent float32 unit-sphere, bidirectional mean squared NN sum',
-                HD='maximum directed squared NN', P2F='saved-coordinate unsigned point-to-triangle',
+                HD=HD_DEFINITION, HD_convention=HD_CONVENTION,
+                P2F='saved-coordinate unsigned point-to-triangle',
                 scale_factor=1000, test_sha256=info['test_sha256'],
                 prediction_sha256={p.name:sha256(p) for p in xyz_dir.glob('*.xyz')}))
         write_json(destination/'health.json', dict(passed=True, final_training=adapter.health,

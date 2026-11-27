@@ -72,6 +72,10 @@ def test_stage_metrics_separate_official_and_shared_coordinates():
     forward = directional_scores(np.array([[0., 0, 0], [4, 0, 0]]), np.zeros((1, 3)))
     assert forward['mean_pred_to_gt'] == 8 and forward['mean_gt_to_pred'] == 0
     assert forward['HD'] == 16 and forward['HD_gt_to_pred'] == 0
+    # Both directions are nonzero and unequal; distinguish sum from max and 2*max.
+    two_sided = directional_scores(np.array([[0., 0, 0], [4, 0, 0]]), np.array([[1., 0, 0]]))
+    assert two_sided['HD_pred_to_gt'] == 9 and two_sided['HD_gt_to_pred'] == 1
+    assert two_sided['HD'] == 10
 
 
 def test_inference_timing_excludes_export_and_records_shape_count(tmp_path):

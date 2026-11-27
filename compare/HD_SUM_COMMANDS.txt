@@ -1,0 +1,55 @@
+HD方向求和协议（2026-11-27）
+
+用户确定采用：HD = max(预测到GT的平方近邻距离) + max(GT到预测的平方近邻距离)。
+预测和GT各自按质心/最大半径归一化，逐物体计算后等权平均，显示乘1000。
+这不是将旧HD乘2，也不是旧PU-GCN含axis问题的逐索引距离相加原式。
+protocol.json中的HD_convention为bidirectional_max_squared_sum_v1。
+统一训练后测试、官方权重全量测试、样例测试和stage_diagnostics都使用此相加口径。
+结构队列读取旧E6验证参考时根据已保存的两个方向最大值重建相加HD；新对照表明确标记口径，不改写旧验证CSV。
+CD和P2F数学定义不变；不将此次HD选择描述为已严格复现作者未固定版本的2025评价工具链。
+
+一、本机上传（PowerShell）
+
+cd D:\dkwork\Gaussian
+git diff -- compare/evaluate_pugaussian_protocol.py compare/native_training_worker.py compare/stage_diagnostics.py compare/test_examples.py compare/tests/test_retraining.py compare/tests/test_structure_integration.py compare/tests/test_examples_export.py
+git add -- compare/evaluate_pugaussian_protocol.py compare/native_training_worker.py compare/stage_diagnostics.py compare/test_examples.py compare/tests/test_retraining.py compare/tests/test_structure_integration.py compare/tests/test_examples_export.py compare/HD_SUM_COMMANDS.txt compare/NATIVE_TRAINING_COMMANDS.txt compare/RETRAINING_COMMANDS.txt compare/TEST_EXAMPLES_COMMANDS.txt compare/TEST_PUGAUSSIAN_FULL_COMMANDS.txt compare/TEST_REPKPU_FULL_COMMANDS.txt compare/TEST_PUCRN_FULL_COMMANDS.txt
+git add -- compare/run_structure_study.py compare/tests/test_structure_study.py compare/RUN_STRUCTURE_STUDY_COMMANDS.md
+git diff --cached --stat
+git diff --cached -- compare/TEST_PUCRN_FULL_COMMANDS.txt
+git commit -m "Use sum of directed squared maxima for unified HD evaluation"
+git push origin main
+
+TEST_PUCRN_FULL_COMMANDS.txt在此次修改前已有工作区改动，提交前的diff用于同时核对这些已有内容。
+不要使用git add .；旧结果、模型权重和其他未提交文件不属于此次指标修改。
+
+二、服务器更新
+
+如果训练队列仍在运行，先保持原代码完成该队列，再拉取本次改动并重评。
+训练/恢复检查会比对源码指纹；不要在运行中git pull或改写旧run的来源哈希以绕过检查。
+本次只改变评价，已有预测可以直接重算，不需为此重训。
+
+cd ~/Gaussian
+git pull --ff-only
+conda activate scdata-v3
+
+以后新建原生训练队列仍使用compare/NATIVE_TRAINING_COMMANDS.txt中的统一启动命令，无新增HD参数。
+
+三、已有原生训练结果：只用保存XYZ重评一个模型（Linux）
+
+将PUGCS_RUN设为实际运行目录；下面示例为PU1K上的E6。
+如果status.json中xyz_dir指向test_retry_*，PUGCS_XYZ应使用该实际目录。
+如果缓存目录不同，PUGCS_TEST也应改为当时实际固定测试路径。
+
+PUGCS_RUN=compare/native-runs/native-full-实际时间
+PUGCS_MODEL=E6
+PUGCS_TEST=data/native_20261127_seed42/PU1K/test
+PUGCS_XYZ="$PUGCS_RUN/pu1k/$PUGCS_MODEL/test/xyz"
+PUGCS_METRICS="$PUGCS_RUN/pu1k/$PUGCS_MODEL/test/metrics-hd-sum-$(date +%Y%m%d-%H%M%S)"
+PYTHONPATH="$PWD/compare/.pugaussian-runtime/python${PYTHONPATH:+:$PYTHONPATH}" PYTHONNOUSERSITE=1 python -u compare/evaluate_pugaussian_protocol.py --dataset PU1K --input-dir "$PUGCS_TEST/input_2048" --gt-dir "$PUGCS_TEST/gt_8192" --mesh-dir "$PUGCS_TEST/meshes" --prediction "$PUGCS_MODEL=$PUGCS_XYZ" --output-dir "$PUGCS_METRICS"
+cat "$PUGCS_METRICS/summary.csv"
+
+PU-GAN对应修改：--dataset PU-GAN；PUGCS_TEST=data/native_20261127_seed42/PU-GAN/test；PUGCS_XYZ中pu1k改为pugan，输出目录也改为pugan。
+可用同一命令逐个模型重评，PUGCS_MODEL可为E0、E6、Grad-PU、RepKPU、PU-Gaussian。
+这条命令读取保存的8192点预测，不重新推断、训练或挑权重；CPU计算无需加载模型或占用训练GPU。
+写入新metrics-hd-sum目录，保留原指标。原run总summary.csv不会自动改写；汇总时应明确采用新目录并核对HD_convention。
+已导出的官方权重测试若为逐物体子目录布局，不能直接将该父目录当平铺prediction目录传入此命令；可重新运行相应官方权重测试入口，或先从保存XYZ整理平铺目录后调用本评价脚本。

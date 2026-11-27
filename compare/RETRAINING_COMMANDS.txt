@@ -24,7 +24,8 @@ PU1K 与 PU-GAN 各跑四组，总计八组，单 GPU 顺序执行。
   E0/E6 PU1K: 50000*(64/16)=200000；PU-GAN:50000*(32/16)=100000；PU-Gaussian 两数据集均100000。
   这是本轮 batch 适配，不声称与原论文每个 epoch 的衰减位置完全相等。RepKPU 原 epoch scheduler 不变。
 - 每5轮及最后一轮，用固定整物体完整4x推断的独立归一化 CD 选 best；PU-Gaussian只在联合阶段选 best。
-- 同一脚本计算 CD（双向平方均值之和）、HD（双向最大平方值的max）、原坐标欧氏 P2F。
+- 同一脚本计算 CD（双向平方均值之和）、HD（两个方向最大平方距离之和）、原坐标欧氏 P2F。
+  2026-11-27起HD使用方向求和口径，protocol.json标记bidirectional_max_squared_sum_v1；旧max结果须重评后比较。
   主表显示原始数值乘1000；逐物体等权平均。Open3D不是已经证明与历史CGAL逐位相同的工具。
 - 仅保留两个模型文件：best.pth 为选中权重；last.pth 含末轮模型、optimizer、scheduler和RNG状态，可续训。
   测试默认使用 best；保存 test/xyz 和 test/metrics，另保留必要日志、配置、哈希、验证指标。
