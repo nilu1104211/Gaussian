@@ -16,6 +16,8 @@ __pycache__/
 
 # New retraining runs and local verification artifacts.
 /compare/retrain-runs/
+/compare/native-runs/
+/compare/native_training.launch.log
 /compare/unified_metrics/
 /tmp/
 /compare/retrain_*.log

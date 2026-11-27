@@ -1,0 +1,186 @@
+原生训练数据、各方法原生流程、统一测试（2026-11-27）
+
+本文件是后续训练入口说明。旧 run_retraining.py、run_structure_study.py 保留用于历史实验；新协议使用 run_native_training.py。
+
+一、实际变化
+
+- E0（PU-CRN基线）、E6、Grad-PU、RepKPU：直接读作者指定的发布H5，不再从mesh给它们重新生成统一训练patch。
+- 归一化后调用各方法自己的 Dataset.__getitem__，保留原生采样、点顺序、旋转、缩放/抖动、PU-CRN输入裁剪等行为。
+- H5逐patch读取，num_workers=0，避免把完整H5及多个worker副本加载到主机内存。
+- E0/E6共享原始H5、种子、batch、增强随机性和训练预算；模型自身损失不同。
+- PU-Gaussian按作者 generate_dataset.py 的几何操作额外准备6x/20x监督：40960点Poisson表面、整物体归一化、FPS中心、5120邻域，再分别FPS得到256/1024/1536。
+  只生成Gaussian需要的H5，分批写入压缩H5，不保存整套中间40960点XYZ。PU-GAN每训练mesh200patch；PU1K ShapeNet每mesh50patch，再追加PU-GAN训练patch。
+- 修正Gaussian第一阶段子模块 num_samples=20，预测/GT均5120；第二阶段及推断为6，预测/GT均1536，最终FPS取4x；推断保留两次细化。
+- Grad-PU保留作者ReLU，默认初始化seed21、lr0.001；训练检查参数梯度/更新，每轮还检查推断模式query梯度。失活时报错，不自动换激活或换种子。
+- 原始发布H5包含旧验证集形状，因此新协议不再使用旧102/12物体验证集，也不以测试分数选best。按预先声明的最后一轮导出final.pth，再做一次统一测试。
+- 默认完整预算：E0/E6各100轮，Grad-PU60轮，RepKPU100轮，Gaussian100+100轮。
+- 默认原生batch：E0/E6在PU1K为64、PU-GAN为32；三个外部方法均32。
+- 默认初始化seed：E0/E6和Gaussian为42，Grad-PU/RepKPU为21。--seed控制数据生成和固定测试随机性。
+- 默认按step的衰减间隔50000；RepKPU/Grad-PU保留原生epoch调度。显式--batch-size覆盖时，step间隔按参考batch换算，配置中会记录。
+- 自动先跑各网络短程smoke，再跑正式训练；smoke只用少量训练patch和合成训练输入做健康检查，不读取benchmark测试集。
+- 所有网络共用127个PU1K测试输入/GT/mesh和27个PU-GAN测试输入/GT/mesh。PU1K测试点不改；PU-GAN优先复用旧固定测试，否则从官方test mesh固定生成一次。
+- 日志默认每100步和每轮首末记录，epoch均值完整保存，减少training.jsonl占用。
+- 新输出在compare/native-runs；旧结果保留在原目录，新旧协议分表报告。
+  新入口不接旧实验last.pth。旧结构实验若需续训，应使用它记录的原始源码版本，保留源码指纹检查。
+
+注：本轮沿用发布的训练池。原始PU1K mesh池已知存在一份与测试mesh内容相同的条目；builder把可核实的原始mesh池重合写入manifest的publisher_pool_audit。
+原始H5缺少可靠的逐patch物体ID，本协议不宣称它已经做了独立物体划分或消除了发布数据本身的重复。
+
+二、必须保留的原始内容
+
+原始H5不会通过Git上传。程序自动识别以下常见位置：
+
+data/PU1K/PU1K/train/pu1k_poisson_256_poisson_1024_pc_2500_patch50_addpugan.h5
+data/PU1K/train/pu1k_poisson_256_poisson_1024_pc_2500_patch50_addpugan.h5
+
+data/PUGAN/PUGAN_poisson_256_poisson_1024.h5
+data/PUGAN/PU-GAN/train/PUGAN_poisson_256_poisson_1024.h5
+data/PU-GAN/train/PUGAN_poisson_256_poisson_1024.h5
+
+H5若存放在其他目录，运行时加 --pu1k-h5 /实际路径/原始文件.h5 --pugan-h5 /实际路径/原始文件.h5。
+存在不同内容的多份候选时，程序要求显式指定，不会随机选取。
+
+Gaussian生成仍需：
+data/PU1K/PU1K_raw_meshes/train/train_meshes 下900个ShapeNet训练mesh
+或 data/PU1K_raw_meshes/train/train_meshes
+data/PUGAN/PU-GAN/{simple,medium,complex} 下120个训练mesh
+或 data/PU-GAN 下对应目录；也支持其train目录。
+PU1K测试输入、GT、original_meshes和PU-GAN/test下27个测试mesh也要保留。
+
+已经有按作者流程生成且包含poisson_256/1024/1536/5120的H5，可显式指定：
+--gaussian-pu1k-h5 /实际路径/pu1k_x20.h5 --gaussian-pugan-h5 /实际路径/pugan_x20.h5
+不要把旧统一patch H5误写成作者原生H5。
+
+三、本机上传Git（PowerShell，每条整行执行）
+
+cd D:\dkwork\Gaussian
+git add -- .gitignore compare/native_training_protocol.py compare/native_training_adapter.py compare/prepare_native_data.py compare/native_training_worker.py compare/run_native_training.py compare/native_training_storage.py compare/tests/test_native_training.py compare/NATIVE_TRAINING_COMMANDS.txt
+git diff --cached --stat
+git commit -m "Add native-data training queue and fix Gaussian stage sampling"
+git push origin main
+
+不使用git add .，避免把其他文档、旧结果或正在修改的文件一起提交。
+
+四、服务器准备与检查（Linux）
+
+cd ~/Gaussian
+git pull --ff-only
+conda activate scdata-v3
+python compare/run_native_training.py --plan
+
+--plan不访问GPU、不生成数据。输出10项配置（5个模型x2个数据集）。
+新入口继续使用已配置的compare/.pugaussian-runtime；缺少依赖时复用原有setup安装流程。
+新的GPU队列与旧重训/结构队列共享training.lock，不同时占用GPU。
+
+五、磁盘空间紧张时，先缓存固定测试，再清理旧生成数据
+
+先查看磁盘、主机内存和显存。这三者不同，删除文件释放的是磁盘空间：
+
+df -h .
+free -h
+nvidia-smi
+python compare/native_training_storage.py
+
+确保没有旧训练任务在运行，再执行：
+
+python compare/run_native_training.py --tests-only
+python compare/native_training_storage.py --delete-old-prepared
+
+第一条只核对原始H5并保存完整固定测试缓存，不生成大型Gaussian训练H5、不训练网络。
+新测试缓存优先硬链接，跨文件系统时复制；删旧路径不会删掉新缓存的文件。
+第二条再次验证两套完整测试的哈希、原始H5哈希和路径依赖，并获取训练锁，然后只清理：
+- data/repro_20261123_seed* 及其对应smoke目录（必须带可识别的旧manifest）。
+- data/prepared（必须带旧split.json和train.h5）。
+- compare/training-runs 内明确命名的旧生成 train.h5、val.h5、pu1k_train_x20.h5、pu1k_val_x20.h5。
+
+如果仍需续训旧统一数据实验，先保留它的原data/repro目录及last.pth，不执行该清理。新原生协议从头训练，不接这些旧checkpoint。
+
+不会清理：原始H5、原始mesh、官方权重、旧best/last权重、日志、CSV、compare/.pugaussian-runtime、新native缓存或新训练目录。
+删除前会把旧manifest.json、split.json和两套数据的split.json备份到compare/native-runs/cleanup-records-*，并保存清理记录；元数据备份失败就不会开始删除。
+若原始H5或其他新协议依赖仍放在待删目录中，会拒绝清理。新固定测试未完整保存、文件哈希改变或GPU队列运行中，也会拒绝清理。
+
+默认新缓存目录：data/native_20261127_seed42。指定其他缓存时，清理也要传相同--cache-root。
+
+六、一条命令运行全部原生完整训练
+
+mkdir -p compare/native-runs
+PUGCS_RUN="compare/native-runs/native-full-$(date +%Y%m%d-%H%M%S)"
+nohup python -u compare/run_native_training.py --run-dir "$PUGCS_RUN" > "${PUGCS_RUN}.launch.log" 2>&1 &
+echo "PID: $!"
+echo "RUN: $PUGCS_RUN"
+echo "LOG: ${PUGCS_RUN}.launch.log"
+
+自动完成：数据检查/必要Gaussian预处理 -> 10组smoke -> 10组原生完整训练 -> 各组最后一轮统一测试 -> summary.csv。
+Gaussian数据第一次生成耗时较长，会逐mesh打印进度，完成后缓存复用。
+若预处理被中断，未完成的H5会重新生成；已完成且哈希一致的H5会复用。
+以上nohup命令保持一整行，不要加入HTML转义字符或复制其他语言的代码块标记。
+
+查看总日志：
+tail -n 80 -f "${PUGCS_RUN}.launch.log"
+
+如果换了终端，请先设置实际目录，例如：
+PUGCS_RUN=compare/native-runs/native-full-20261127-120000
+tail -n 80 -f "${PUGCS_RUN}.launch.log"
+python compare/run_native_training.py --status --resume-run "$PUGCS_RUN"
+
+单网络日志示例：
+tail -n 40 -f "$PUGCS_RUN/pu1k/RepKPU/train.log"
+
+七、只做20轮短跑（替代上一节的完整训练命令，两者选一个）
+
+mkdir -p compare/native-runs
+PUGCS_RUN="compare/native-runs/native-screen20-$(date +%Y%m%d-%H%M%S)"
+nohup python -u compare/run_native_training.py --epochs 20 --no-test --run-dir "$PUGCS_RUN" > "${PUGCS_RUN}.launch.log" 2>&1 &
+echo "PID: $! RUN: $PUGCS_RUN LOG: ${PUGCS_RUN}.launch.log"
+
+这里每个模型20轮，Gaussian为10+10，不等价于完整100+100配方。
+--no-test用于训练稳定性排查，不产生最终测试排名；epochs.csv中有训练loss和Grad-PU query健康指标。
+若明确要一次预先指定的20轮最终测试，去掉--no-test；不得反复看测试结果挑轮数或调参。
+20轮不能证明已达到原论文性能。预算从20改为完整轮数应开新实验，尤其Gaussian阶段切换时点不同。
+
+只运行某些方法可以加：--models Grad-PU RepKPU
+只运行某数据集可以加：--datasets pu1k
+显存不足可显式加--batch-size 16；这会记录为batch覆盖实验，不再称默认原生batch。
+改batch需要新建运行目录，不能给已有--resume-run修改配置。
+CPU内存已由逐patch读取控制，不需要为避免一次加载整个H5而降低batch。
+
+八、中断恢复
+
+使用日志显示的实际运行目录：
+
+PUGCS_RUN=compare/native-runs/native-full-20261127-120000
+nohup python -u compare/run_native_training.py --resume-run "$PUGCS_RUN" >> "${PUGCS_RUN}.launch.log" 2>&1 &
+
+恢复只传--resume-run，不重写预算/模型列表；配置、数据哈希和源码必须一致。
+已完成项校验权重后跳过，其余从最近完整epoch的last.pth恢复optimizer/scheduler/RNG。
+运行时遇到梯度失活会停止并保存status.json中的诊断；不会悄悄改方法后继续。
+Grad-PU在训练或距离场探针中失败还会导出failure_batch.npz、failure.pth和failure.json，便于原生算子环境复查；这些是诊断状态，不作为续训入口。
+
+九、输出与后续清理
+
+每项正式训练：
+- final.pth：预先指定最后一轮的纯模型权重。
+- last.pth：最近完整epoch的模型、optimizer、scheduler、RNG，用于恢复。
+- config.json、manifest.json：原始H5路径/哈希、固定测试哈希、原生参数和源码来源。
+- epochs.csv：完整逐轮均值；training.jsonl和train.log：间隔采样日志。
+- test/xyz、test/metrics：只在启用最终测试时生成；summary.csv在总运行目录聚合。
+
+确认本机备份完整后，旧 compare/training-runs、compare/retrain-runs 中的旧权重、大型training.jsonl、重复PLY/XYZ可以按需删。
+其中structure-screen20-20261126的last.pth一旦删除就不能续训旧结构实验；保留旧对照的CSV、配置、来源哈希和必要最终权重更便于论文追溯。
+本清理工具不自动删除这些实验记录。compare/test-runs也应备份后再处理。
+保留compare/.pugaussian-runtime（含有效Python依赖/编译扩展）、baseline和compare下官方预训练权重，以便阳性对照。
+不要把系统drop_caches或删除conda环境当作释放训练显存的方法；显存由相关进程占用。
+
+十、作者来源
+
+PU-CRN：https://github.com/hikvision-research/3DVision/tree/main/PointUpsampling/PUCRN
+Grad-PU：https://github.com/yunhe20/Grad-PU
+RepKPU：https://github.com/EasyRy/RepKPU
+PU-Gaussian：https://github.com/mvg-inatech/PU-Gaussian
+Gaussian阶段补充：https://github.com/mvg-inatech/PU-Gaussian/issues/2#issuecomment-4279320425
+
+本机验证使用PyTorch参考KNN/FPS/CD；服务器命令会先检查原生CUDA扩展并自动smoke。
+本次已验证10个模型/数据集组合的短程训练与8192点推断；读取器与原生Dataset的逐点比较为0差异。
+另在真实原始H5上完成Grad-PU/RepKPU双数据集的batch4短跑、Gaussian生成操作对照及2对象的训练到最终指标导出。
+本机8GB显存下参考算子batch32检查因显存压力停止，不能将这些本机小batch检查写成服务器默认batch已通过。
+本机短跑和程序检查不能替代服务器完整训练，也不承诺原生数据切换后一定复现论文数值。
